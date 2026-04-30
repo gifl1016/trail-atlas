@@ -1,0 +1,67 @@
+name: Deploy Trail Atlas
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+
+  # Manueller Trigger über GitHub UI
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to VM
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Code auschecken ──────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. SSH-Key einrichten ────────────────────────────────────────────────
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      # ── 3. Dateien auf VM kopieren ───────────────────────────────────────────
+      - name: Copy files to VM
+        run: |
+          scp -i ~/.ssh/deploy_key \
+            src/garmin_trail_atlas_*.html \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:~/trail-atlas/src/
+
+          scp -i ~/.ssh/deploy_key \
+            scripts/deploy.sh \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:~/trail-atlas/scripts/
+
+      # ── 4. Deploy-Script remote ausführen ───────────────────────────────────
+      - name: Run deploy script on VM
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "bash ~/trail-atlas/scripts/deploy.sh"
+
+      # ── 5. Health-Check ──────────────────────────────────────────────────────
+      - name: Health check
+        run: |
+          sleep 3
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -u "${{ secrets.BASIC_AUTH_USER }}:${{ secrets.BASIC_AUTH_PASS }}" \
+            "https://${{ secrets.VM_HOST }}")
+          echo "HTTP Status: $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "❌ Health check failed: HTTP $HTTP_CODE"
+            exit 1
+          fi
+          echo "✅ Health check passed"
+
+      # ── 6. SSH-Key aufräumen ─────────────────────────────────────────────────
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

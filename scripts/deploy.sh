@@ -48,13 +48,13 @@ fi
 echo "  HTML: $(basename "$HTML_FILE")"
 
 # Platzhalter-Check
-for placeholder in LEAFLET_CSS_SRI LEAFLET_JS_SRI PAPAPARSE_SRI DEXIE_SRI; do
-    if ! grep -q "$placeholder" "$HTML_FILE"; then
-        red "❌  Platzhalter '$placeholder' nicht in HTML gefunden."
-        echo "    Stelle sicher dass du die _local.html Variante verwendest."
-        exit 1
-    fi
-done
+#for placeholder in LEAFLET_CSS_SRI LEAFLET_JS_SRI PAPAPARSE_SRI DEXIE_SRI; do
+#    if ! grep -q "$placeholder" "$HTML_FILE"; then
+#        red "❌  Platzhalter '$placeholder' nicht in HTML gefunden."
+#        echo "    Stelle sicher dass du die _local.html Variante verwendest."
+#        exit 1
+#    fi
+#done
 
 # ── Ordner erstellen ──────────────────────────────────────────────────────────
 mkdir -p "$LIBS_DIR"

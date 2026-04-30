@@ -450,7 +450,7 @@ async function checkApiHealth() {
     const data = await apiFetch("/health");
     if (data.status !== "ok") throw new Error("API nicht bereit");
   } catch(e) {
-    throw new Error("Server nicht erreichbar. Bitte prüfe die Verbindung zur VM. (" + e.message + ")");
+    throw new Error("Server  nicht erreichbar. Bitte prüfe die Verbindung zur VM. (" + e.message + ")");
   }
 }
 

@@ -22,3 +22,5 @@ ubuntu ALL=(ALL) NOPASSWD: /usr/bin/chmod 644 /var/www/trail-atlas/index.html
 ubuntu ALL=(ALL) NOPASSWD: /usr/bin/chmod -R 644 /var/www/trail-atlas/libs
 ubuntu ALL=(ALL) NOPASSWD: /usr/bin/chmod 755 /var/www/trail-atlas
 ubuntu ALL=(ALL) NOPASSWD: /usr/bin/chmod 755 /var/www/trail-atlas/libs
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/chown -R ubuntu /var/www/trail-atlas
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /var/www/trail-atlas/libs

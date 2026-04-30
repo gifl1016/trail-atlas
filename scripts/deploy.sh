@@ -59,6 +59,9 @@ done
 # ── Ordner erstellen ──────────────────────────────────────────────────────────
 mkdir -p "$LIBS_DIR"
 
+sudo chown -R $USER /var/www/trail-atlas 2>/dev/null || true
+sudo mkdir -p "$LIBS_DIR"
+
 # ── Libraries herunterladen (nur wenn nötig) ──────────────────────────────────
 sri_hash() {
     echo -n "sha384-$(openssl dgst -sha384 -binary "$1" | openssl base64 -A)"

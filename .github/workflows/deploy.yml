@@ -8,7 +8,6 @@ on:
       - 'src/**'
       - 'scripts/**'
 
-  # Manueller Trigger über GitHub UI
   workflow_dispatch:
 
 jobs:
@@ -17,11 +16,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ── 1. Code auschecken ──────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full git history needed to find last-changed file reliably
 
-      # ── 2. SSH-Key einrichten ────────────────────────────────────────────────
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
@@ -29,39 +28,67 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
-      # ── 3. Dateien auf VM kopieren ───────────────────────────────────────────
+      - name: Determine latest HTML (via git history)
+        id: latest
+        run: |
+          # Find the .html file in src/ most recently touched in git history.
+          # 'ls -t' is unreliable in CI because checkout normalises mtimes.
+          LATEST=$(git log --name-only --pretty=format: --diff-filter=AM -- 'src/*.html' \
+                  | grep -E '^src/.*\.html$' \
+                  | awk '!seen[$0]++' \
+                  | head -1)
+          if [ -z "$LATEST" ]; then
+            echo "❌ No HTML file found in src/"
+            exit 1
+          fi
+          echo "Latest HTML: $LATEST"
+          echo "latest_html=$LATEST" >> $GITHUB_OUTPUT
+          echo "latest_basename=$(basename "$LATEST")" >> $GITHUB_OUTPUT
+
       - name: Copy files to VM
         run: |
+          # Clean old src files first so deploy.sh can't pick stale ones
+          ssh -i ~/.ssh/deploy_key \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "rm -f ~/trail-atlas/src/*.html"
+
+          # Copy ONLY the latest HTML
           scp -i ~/.ssh/deploy_key \
-            src/garmin_trail_atlas_*.html \
+            "${{ steps.latest.outputs.latest_html }}" \
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:~/trail-atlas/src/
 
           scp -i ~/.ssh/deploy_key \
             scripts/deploy.sh \
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:~/trail-atlas/scripts/
 
-      # ── 4. Deploy-Script remote ausführen ───────────────────────────────────
+          ssh -i ~/.ssh/deploy_key \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "chmod +x ~/trail-atlas/scripts/deploy.sh"
+
       - name: Run deploy script on VM
         run: |
           ssh -i ~/.ssh/deploy_key \
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
             "bash ~/trail-atlas/scripts/deploy.sh"
 
-      # ── 5. Health-Check ──────────────────────────────────────────────────────
       - name: Health check
         run: |
           sleep 3
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
             -u "${{ secrets.BASIC_AUTH_USER }}:${{ secrets.BASIC_AUTH_PASS }}" \
             "https://${{ secrets.VM_HOST }}")
-          echo "HTTP Status: $HTTP_CODE"
+          API_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -u "${{ secrets.BASIC_AUTH_USER }}:${{ secrets.BASIC_AUTH_PASS }}" \
+            "https://${{ secrets.VM_HOST }}/api/health")
+          echo "Deployed:    ${{ steps.latest.outputs.latest_basename }}"
+          echo "HTML status: $HTTP_CODE"
+          echo "API  status: $API_CODE"
           if [ "$HTTP_CODE" != "200" ]; then
-            echo "❌ Health check failed: HTTP $HTTP_CODE"
+            echo "❌ Health check failed: HTML HTTP $HTTP_CODE"
             exit 1
           fi
           echo "✅ Health check passed"
 
-      # ── 6. SSH-Key aufräumen ─────────────────────────────────────────────────
       - name: Cleanup SSH key
         if: always()
         run: rm -f ~/.ssh/deploy_key

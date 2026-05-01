@@ -1,170 +1,236 @@
-# Trail Atlas
+# Trail Atlas Backend
 
-Mobile Web-App zur Visualisierung von Garmin GPS-Aktivitätsdaten.  
-Gebaut mit Leaflet, PapaParse, Dexie (IndexedDB) – alles in einer einzelnen HTML-Datei.
-
----
-
-## Repository-Struktur
-
-```
-trail-atlas/
-├── .github/
-│   └── workflows/
-│       └── deploy.yml          ← GitHub Actions CI/CD Pipeline
-├── scripts/
-│   ├── deploy.sh               ← Server-seitiges Deploy-Script
-│   └── sudoers_trail_atlas.txt ← Sudoers-Konfiguration für den Deploy-User
-├── src/
-│   └── garmin_trail_atlas_*.html  ← App-Versionen (local-Variante mit SRI-Platzhaltern)
-└── README.md
-```
+FastAPI + SQLite REST-API für die Trail Atlas Web-App.  
+Stellt Aktivitäts-Metadaten und GPS-Punkte bereit, ersetzt die bisherige IndexedDB im Browser.
 
 ---
 
-## Einmalige Einrichtung
+## Architektur
 
-### 1. VM vorbereiten
+```
+                 ┌──────────────────────────────────────┐
+                 │  Trail Atlas Web App (HTML/JS)       │
+                 │  https://trail-atlas.duckdns.org/    │
+                 └─────────────────┬────────────────────┘
+                                   │ HTTPS + Basic Auth
+                                   ▼
+                 ┌──────────────────────────────────────┐
+                 │  Nginx (Reverse Proxy + TLS)         │
+                 │  /            → /var/www/...         │
+                 │  /libs/       → /var/www/.../libs/   │
+                 │  /api/        → 127.0.0.1:8000       │
+                 └─────────────────┬────────────────────┘
+                                   │ HTTP localhost
+                                   ▼
+                 ┌──────────────────────────────────────┐
+                 │  FastAPI (uvicorn, single worker)    │
+                 │  systemd: trail-atlas.service        │
+                 │  /opt/trail-atlas/backend/main.py    │
+                 └─────────────────┬────────────────────┘
+                                   │ persistent connection
+                                   ▼
+                 ┌──────────────────────────────────────┐
+                 │  SQLite (WAL-Modus)                  │
+                 │  /var/lib/trail-atlas/trail_atlas.db │
+                 └──────────────────────────────────────┘
+```
+
+---
+
+## Datei-Layout auf der VM
+
+```
+/opt/trail-atlas/
+├── backend/
+│   ├── main.py             ← FastAPI Endpoints
+│   └── database.py         ← SQLite Wrapper
+└── venv/                   ← Python virtualenv
+
+/var/lib/trail-atlas/
+└── trail_atlas.db          ← SQLite Datenbank (+ WAL/SHM Files)
+
+/etc/systemd/system/
+└── trail-atlas.service     ← Systemd Unit
+```
+
+---
+
+## API Endpoints
+
+Alle Endpoints sind durch **Nginx Basic Auth** geschützt.  
+Base-URL: `https://trail-atlas.duckdns.org/api`
+
+### Health
+
+| Method | Path | Beschreibung |
+|--------|------|--------------|
+| `GET`  | `/health` | Verfügbarkeitscheck, gibt Version zurück |
+
+### Activities
+
+| Method | Path | Beschreibung |
+|--------|------|--------------|
+| `GET`    | `/activities` | Alle Aktivitäten |
+| `GET`    | `/activities/{id}` | Einzelne Aktivität |
+| `GET`    | `/activities/{id}/gps` | GPS-Punkte als `[[lat, lng], ...]` |
+| `DELETE` | `/activities/{id}` | Aktivität + alle GPS-Punkte löschen |
+
+### Import
+
+| Method | Path | Body | Beschreibung |
+|--------|------|------|--------------|
+| `POST` | `/import/summary` | `multipart/form-data: file` | CSV mit Metadaten (`activity_summary_*.csv`) |
+| `POST` | `/import/gps`     | `multipart/form-data: file` | CSV mit GPS-Punkten (`all_fit_data_*.csv`) |
+
+Pflichtfelder werden serverseitig validiert. Antwort enthält Statistik:
+```json
+{ "imported": 485, "skipped": 0, "duplicates": 0, "elapsed_s": 1.42 }
+```
+
+### DB Management
+
+| Method | Path | Beschreibung |
+|--------|------|--------------|
+| `GET`    | `/db/stats` | Anzahl Aktivitäten, GPS-Punkte, ohne GPS, nach Typ |
+| `DELETE` | `/db/reset` | Alle Daten löschen + VACUUM |
+| `DELETE` | `/db/gps`   | Nur GPS-Punkte löschen, Metadaten bleiben |
+
+### Swagger UI
+
+Interaktive API-Dokumentation: `https://trail-atlas.duckdns.org/api/docs`
+
+---
+
+## Beispiele
 
 ```bash
-# Ordner erstellen
-mkdir -p ~/trail-atlas/src ~/trail-atlas/scripts
+# Health-Check
+curl -u "user:pass" https://trail-atlas.duckdns.org/api/health
 
-# Deploy-Script kopieren (oder via git clone)
-scp scripts/deploy.sh user@trail-atlas.duckdns.org:~/trail-atlas/scripts/
+# Alle Touren auflisten
+curl -u "user:pass" https://trail-atlas.duckdns.org/api/activities
 
-# Sudoers einrichten (DEIN_USER ersetzen)
-sudo visudo -f /etc/sudoers.d/trail-atlas
-# → Inhalt aus scripts/sudoers_trail_atlas.txt einfügen, DEIN_USER ersetzen
+# Einzelne Tour löschen
+curl -u "user:pass" -X DELETE \
+  https://trail-atlas.duckdns.org/api/activities/20240925181045
 
-# Sudoers testen
-sudo nginx -t
-sudo systemctl reload nginx
-```
+# CSV importieren
+curl -u "user:pass" -X POST \
+  -F "file=@activity_summary.csv" \
+  https://trail-atlas.duckdns.org/api/import/summary
 
-### 2. Deploy-Key für GitHub Actions erstellen
+# Datenbank-Statistik
+curl -u "user:pass" https://trail-atlas.duckdns.org/api/db/stats
 
-```bash
-# Neues Key-Paar generieren (kein Passphrase!)
-ssh-keygen -t ed25519 -C "github-actions-trail-atlas" -f ~/.ssh/github_deploy -N ""
-
-# Public Key auf VM autorisieren
-cat ~/.ssh/github_deploy.pub >> ~/.ssh/authorized_keys
-
-# Private Key anzeigen → als GitHub Secret speichern
-cat ~/.ssh/github_deploy
-```
-
-### 3. GitHub Secrets einrichten
-
-Im GitHub Repository → **Settings → Secrets and variables → Actions → New repository secret**:
-
-| Secret Name | Wert | Beschreibung |
-|---|---|---|
-| `SSH_PRIVATE_KEY` | Inhalt von `~/.ssh/github_deploy` | Deploy-Key (Private) |
-| `VM_HOST` | `trail-atlas.duckdns.org` | Hostname oder IP der VM |
-| `VM_USER` | `dein-username` | SSH-Login-User auf der VM |
-| `BASIC_AUTH_USER` | `dein-nginx-user` | Nginx Basic Auth Benutzername |
-| `BASIC_AUTH_PASS` | `dein-nginx-passwort` | Nginx Basic Auth Passwort |
-
-### 4. Ersten Deploy testen
-
-```bash
-# Repository klonen
-git clone https://github.com/DEIN_USERNAME/trail-atlas.git
-cd trail-atlas
-
-# HTML-Datei hinzufügen
-cp /pfad/zu/garmin_trail_atlas_v2.6_local.html src/
-
-# Pushen → GitHub Actions startet automatisch
-git add .
-git commit -m "feat: initial deploy v2.6"
-git push origin main
-```
-
-Deploy-Status unter: `https://github.com/DEIN_USERNAME/trail-atlas/actions`
-
----
-
-## Workflow – Neue Version deployen
-
-```bash
-# 1. Neue HTML von Claude herunterladen
-# 2. In src/ ablegen
-cp garmin_trail_atlas_v2.7_local.html src/
-
-# 3. Pushen
-git add src/garmin_trail_atlas_v2.7_local.html
-git commit -m "feat: v2.7 - neue features"
-git push origin main
-
-# → GitHub Actions deployed automatisch
-# → Browser refreshen: https://trail-atlas.duckdns.org
-```
-
-**Das ist der komplette Workflow.** Kein SSH, kein manuelles Deploy mehr.
-
----
-
-## Manuelles Deploy (Fallback)
-
-Falls GitHub Actions nicht verfügbar:
-
-```bash
-ssh user@trail-atlas.duckdns.org
-cd ~/trail-atlas
-git pull
-bash scripts/deploy.sh
+# Komplette DB zurücksetzen
+curl -u "user:pass" -X DELETE \
+  https://trail-atlas.duckdns.org/api/db/reset
 ```
 
 ---
 
-## HTML-Datei Konventionen
+## Konsistenz: GUI ↔ API
 
-Die App-Dateien in `src/` müssen:
-- Den Namen `garmin_trail_atlas_*.html` haben
-- Die `_local`-Variante sein (mit SRI-Platzhaltern statt CDN-URLs)
-- Folgende Platzhalter enthalten: `LEAFLET_CSS_SRI`, `LEAFLET_JS_SRI`, `PAPAPARSE_SRI`, `DEXIE_SRI`
+Die App und die API arbeiten auf **derselben** SQLite-Datenbank. Eine Änderung über die API ist sofort in der App sichtbar (und umgekehrt) – ein Refresh genügt.
 
-Das Deploy-Script wählt automatisch die **neueste Datei** (nach Änderungsdatum) aus `src/`.
+**Wichtig zur Konsistenz:**  
+Das Backend nutzt eine **persistente Single-Connection** statt für jeden Request eine neue zu öffnen. Damit sind Writes für nachfolgende Reads sofort sichtbar (kein WAL-Race-Condition mehr).
+
+**Wichtig für DELETE-Methoden:**  
+FastAPI ist mit `redirect_slashes=False` konfiguriert. Damit verursachen DELETE-Calls auf URLs mit oder ohne Trailing-Slash kein `307`-Redirect, das Clients/Browser zu `GET` umwandeln würden (was zu `405 Method Not Allowed` führt).
 
 ---
 
-## Deploy-Log einsehen
+## Deployment
+
+### Erstinstallation
 
 ```bash
-ssh user@trail-atlas.duckdns.org "cat ~/trail-atlas/deploy.log"
+# ZIP auf VM kopieren und entpacken
+scp trail-atlas-backend.zip user@vm:~/
+ssh user@vm "unzip trail-atlas-backend.zip"
+
+# Installation ausführen
+cd ~/trail-atlas-backend
+sudo bash setup_backend.sh
 ```
 
-Beispiel-Output:
-```
-2026-01-15 14:23:01 | garmin_trail_atlas_v2.6_local.html | OK
-2026-01-16 09:11:44 | garmin_trail_atlas_v2.7_local.html | OK
-```
+Das Setup-Script erstellt System-User, Python venv, kopiert Code, richtet systemd ein und ergänzt die Nginx-Config um den `/api/`-Proxy.
 
----
+### Updates
 
-## Libraries updaten
-
-Die Libraries (Leaflet, PapaParse, Dexie) werden gecacht und nur beim ersten Deploy heruntergeladen.  
-Um sie neu zu laden (z.B. nach Versionsupdate in `deploy.sh`):
+Wenn nur `main.py` oder `database.py` geändert wurden:
 
 ```bash
-ssh user@trail-atlas.duckdns.org "bash ~/trail-atlas/scripts/deploy.sh --force"
+sudo cp main.py database.py /opt/trail-atlas/backend/
+sudo systemctl restart trail-atlas
 ```
 
 ---
 
-## Versionshistorie
+## Logs & Diagnose
 
-| Version | Datum | Highlights |
-|---|---|---|
-| v1.0 | 2025-01 | Karte, Tracks, Import, IndexedDB |
-| v1.2 | 2025-02 | Stats, Diagramm, Zeitfilter, Distanz |
-| v2.0 | 2025-03 | Performance, Marker, Kartenstile, Dropdowns |
-| v2.2 | 2025-04 | fitBounds-Control, Dim-Overlay, Bugfixes |
-| v2.3 | 2025-05 | Datenverwaltung, Import-Validierung |
-| v2.4c | 2025-06 | Track-Selektion, Canvas-Renderer |
-| v2.5 | 2025-07 | Empty States, Loading Screen |
-| v2.6 | 2025-08 | XSS-Escaping, SRI-Hashes, CSP |
+```bash
+# Service-Status
+sudo systemctl status trail-atlas
+
+# Live-Logs (Errors, Imports, Deletes etc.)
+sudo journalctl -u trail-atlas -f
+
+# Letzte 50 Zeilen
+sudo journalctl -u trail-atlas -n 50
+
+# Direkt auf API zugreifen (umgeht Nginx)
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/db/stats
+
+# Datenbank manuell prüfen
+sudo -u trail-atlas sqlite3 /var/lib/trail-atlas/trail_atlas.db
+sqlite> SELECT COUNT(*) FROM activities;
+sqlite> SELECT COUNT(*) FROM gps_points;
+sqlite> .quit
+```
+
+---
+
+## Performance-Charakteristik
+
+Auf einer 1GB RAM / 1 vCPU VM mit 485 Touren und ~485.000 GPS-Punkten:
+
+| Operation | Dauer |
+|-----------|-------|
+| `GET /activities` | < 5 ms |
+| `GET /activities/{id}/gps` (1.000 Punkte) | < 10 ms |
+| `POST /import/summary` (485 Zeilen) | ~ 0.3 s |
+| `POST /import/gps` (485.000 Punkte) | ~ 8 s |
+| `DELETE /activities/{id}` | < 20 ms |
+| `DELETE /db/reset` | < 50 ms |
+
+**RAM-Verbrauch des Backend-Prozesses:** ~60–80 MB (idle), ~120 MB (während Import).
+
+---
+
+## Sicherheit
+
+- **Keine offenen Ports:** uvicorn lauscht nur auf `127.0.0.1:8000`. Erreichbar ausschließlich über Nginx.
+- **Authentifizierung:** Nginx Basic Auth mit `htpasswd` – vor jedem API-Call.
+- **Berechtigungen:** systemd-User `trail-atlas` ohne Login-Shell. Schreibzugriff nur auf `/var/lib/trail-atlas`.
+- **systemd-Hardening:** `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`.
+- **CORS:** nur Same-Origin erlaubt.
+- **Input Validation:** alle CSV-Felder werden serverseitig validiert (Koordinaten-Range, Datumsformat, Pflichtfelder).
+
+---
+
+## Bekannte Einschränkungen
+
+- **Single-User:** Keine Login-Verwaltung, kein Multi-Tenant. Alle Nutzer mit Basic Auth Credentials sehen dieselben Daten.
+- **Backup:** Die SQLite-DB liegt nur auf der VM. Für Persistenz sollte regelmäßig die `/var/lib/trail-atlas/trail_atlas.db` gesichert werden.
+
+---
+
+## Roadmap
+
+- Garmin-Sync direkt über die API (statt CSV-Upload)
+- Multi-User-Support mit Login-System
+- Automatisches DB-Backup als zusätzlicher API-Endpoint
+- Streaming-Endpoint für GPS-Punkte (lazy loading bei vielen Touren)

@@ -1,0 +1,1279 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<!-- CSP: scripts/styles served locally, only map tiles loaded externally -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src data: blob: https://*.basemaps.cartocdn.com https://*.tile.opentopomap.org https://server.arcgisonline.com; connect-src 'self'; worker-src blob:; object-src 'none'; frame-ancestors 'none';">
+<title>Trail Atlas · v3.2-api</title>
+<link rel="stylesheet" href="/libs/leaflet.css" integrity="LEAFLET_CSS_SRI" crossorigin="anonymous"/>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;background:#0d0d0d;font-family:'DM Sans','Segoe UI',sans-serif;color:#e8e8e0;overflow:hidden}
+  #root{position:relative;width:100%;height:100dvh;overflow:hidden}
+
+  /* ── MAP ── */
+  #map{position:absolute;inset:0;bottom:60px;z-index:0}
+
+  /* ── LEGEND – only visible on map tab ── */
+  #legend{position:absolute;top:12px;left:12px;z-index:500;background:rgba(10,10,10,.88);border:1px solid #1f1f1f;border-radius:10px;padding:10px 14px;backdrop-filter:blur(4px);display:none}
+  #legend.map-active{display:block}
+  .leg-row{display:flex;align-items:center;gap:7px;font-size:11px;color:#888;padding:2px 0;text-transform:capitalize}
+  .leg-line{width:18px;height:3px;border-radius:2px;flex-shrink:0}
+
+  /* ── PANELS ── */
+  .panel{position:absolute;inset:0;bottom:60px;background:#0d0d0d;display:flex;flex-direction:column;overflow:hidden;opacity:0;pointer-events:none;transition:opacity .2s}
+  .panel.active{opacity:1;pointer-events:all}
+
+  /* ── NAV ── */
+  #nav{position:absolute;bottom:0;left:0;right:0;height:60px;background:#111;border-top:1px solid #1f1f1f;display:flex;z-index:1000}
+  .nav-btn{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;background:none;border:none;cursor:pointer;color:#444;transition:color .15s;padding:0}
+  .nav-btn.active{color:#00e5ff}
+  .nav-icon{font-size:17px;line-height:1}
+  .nav-label{font-size:9px;letter-spacing:.8px;text-transform:uppercase;font-weight:500}
+
+  /* ── PANEL-LIST: 4-zone layout ── */
+  #panel-list{display:flex;flex-direction:column}
+
+  /* Zone 1: Metrics banner ~10% */
+  .stats-banner{display:grid;grid-template-columns:1fr 1fr 1fr;border-bottom:1px solid #1a1a1a;flex-shrink:0}
+  .sb-item{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:10px 4px 8px;gap:1px}
+  .sb-val{font-size:17px;font-weight:600;color:#00e5ff;font-variant-numeric:tabular-nums}
+  .sb-lbl{font-size:9px;color:#444;text-transform:uppercase;letter-spacing:.8px}
+
+  /* Zone 2: Chart ~20% */
+  .chart-zone{flex-shrink:0;border-bottom:1px solid #1a1a1a;padding:8px 14px 10px;background:#0a0a0a}
+  .chart-controls{display:flex;gap:6px;margin-bottom:10px;align-items:center}
+  .cc-select{background:#141414;border:1px solid #252525;color:#888;font-size:10px;padding:3px 8px;border-radius:16px;cursor:pointer;outline:none}
+  .cc-select:focus{border-color:#00e5ff55;color:#00e5ff}
+  .cc-label{font-size:9px;color:#333;text-transform:uppercase;letter-spacing:.6px;margin-right:2px}
+  #chart-canvas{width:100%;display:block}
+
+  /* Zone 3: Filter bar ~5% */
+  /* ── FILTER ZONE: dropdown-based ── */
+  .filter-zone{display:flex;align-items:center;gap:6px;padding:6px 10px;border-bottom:1px solid #1a1a1a;flex-shrink:0;background:#0d0d0d;min-height:42px;flex-wrap:nowrap}
+  .fz-select{flex:1;min-width:0;background:#141414;border:1px solid #252525;color:#888;font-size:10px;padding:5px 8px;border-radius:16px;cursor:pointer;outline:none;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23555'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center;padding-right:22px}
+  .fz-select:focus{border-color:#00e5ff55;color:#00e5ff}
+  .fz-divider{width:1px;height:18px;background:#1f1f1f;flex-shrink:0}
+  .sort-select{flex:1;min-width:0;background:#141414;border:1px solid #252525;color:#888;font-size:10px;padding:5px 8px;border-radius:16px;cursor:pointer;outline:none;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23555'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center;padding-right:22px}
+  .sort-select:focus{border-color:#00e5ff55;color:#00e5ff}
+
+  /* ── MAP STYLE SWITCHER ── */
+  #map-style-btn{position:absolute;top:12px;right:48px;z-index:600;width:30px;height:30px;background:rgba(10,10,10,.88);border:1px solid #1f1f1f;border-radius:6px;cursor:pointer;display:none;align-items:center;justify-content:center;font-size:14px;color:#888;transition:color .15s}
+  #map-style-btn.map-active{display:flex}
+  #map-style-btn:hover{color:#00e5ff}
+  #map-style-menu{position:absolute;top:46px;right:48px;z-index:700;background:#111;border:1px solid #1f1f1f;border-radius:10px;overflow:hidden;display:none;min-width:130px}
+  #map-style-menu.open{display:block}
+  .msm-item{display:block;width:100%;padding:9px 14px;background:none;border:none;color:#888;font-size:12px;text-align:left;cursor:pointer;border-bottom:1px solid #1a1a1a}
+  .msm-item:last-child{border-bottom:none}
+  .msm-item.active{color:#00e5ff;background:#00e5ff0a}
+  .msm-item:hover{background:#1a1a1a}
+
+  /* ── MAP DIM OVERLAY (for bright tile styles) ── */
+  #map-dim{position:absolute;inset:0;bottom:60px;z-index:1;pointer-events:none;background:rgba(0,0,0,0);transition:background .4s}
+  #map-dim.dimmed{background:rgba(0,0,0,0.38)}
+
+  /* ── SELECTION BADGE ── */
+  #sel-badge{position:absolute;bottom:76px;left:50%;transform:translateX(-50%);z-index:600;background:#0d0d0d;border:1px solid #00e5ff44;border-radius:20px;padding:6px 14px 6px 10px;display:none;align-items:center;gap:8px;font-size:11px;color:#00e5ff;white-space:nowrap;pointer-events:all}
+  #sel-badge.show{display:flex}
+  #sel-badge-label{max-width:180px;overflow:hidden;text-overflow:ellipsis}
+  #sel-badge-close{background:none;border:none;color:#00e5ff88;cursor:pointer;font-size:13px;padding:0;line-height:1;flex-shrink:0}
+
+  /* ── "AUF KARTE ZEIGEN" BUTTON ── */
+  .show-on-map-btn{width:100%;margin-top:12px;padding:11px;background:#00e5ff12;border:1px solid #00e5ff33;border-radius:10px;color:#00e5ff;font-size:13px;font-weight:500;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px}
+  .show-on-map-btn:active{background:#00e5ff22}
+
+  .start-marker{width:17px;height:17px;border-radius:50%;border:2px solid rgba(0,0,0,.5);cursor:pointer;transition:transform .15s}
+  .start-marker:hover{transform:scale(1.5)}
+
+  /* Zone 4: Tour list */
+  .list-scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+  .list-card{width:100%;display:flex;align-items:center;gap:10px;padding:12px 16px;background:transparent;border:none;border-bottom:1px solid #161616;cursor:pointer;text-align:left;color:#e8e8e0;transition:background .1s}
+  .list-card:active{background:#141414}
+  .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+  .lc-body{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0}
+  .lc-title{font-size:13px;font-weight:500}
+  .lc-sub{font-size:11px;color:#555;text-transform:capitalize;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .lc-dist{font-size:12px;color:#00e5ff;font-variant-numeric:tabular-nums;flex-shrink:0;margin-left:4px}
+  .chevron{color:#2a2a2a;font-size:16px;flex-shrink:0}
+
+  /* ── IMPORT PANEL ── */
+  .panel-header{padding:16px 18px 10px;border-bottom:1px solid #1a1a1a;flex-shrink:0}
+  .panel-title{font-size:17px;font-weight:600;letter-spacing:.5px}
+  .import-body{flex:1;overflow-y:auto;padding:20px}
+  .import-hint{font-size:13px;color:#666;margin-bottom:20px;line-height:1.65}
+  .import-hint strong{color:#999}
+  .upload-btn{display:inline-flex;align-items:center;gap:8px;padding:11px 22px;background:#00e5ff12;color:#00e5ff;border:1px solid #00e5ff33;border-radius:10px;font-size:13px;font-weight:500;cursor:pointer;margin-bottom:20px}
+  .prog-wrap{height:4px;background:#1a1a1a;border-radius:2px;overflow:hidden;margin-bottom:8px;display:none}
+  .prog-bar{height:100%;background:#00e5ff;border-radius:2px;transition:width .25s;width:0%}
+  .prog-label{font-size:11px;color:#444;margin-bottom:16px;display:none}
+  .err-msg{font-size:12px;color:#ff4d4d;margin-top:8px;display:none}
+  .stats-box{background:#131313;border-radius:12px;padding:16px}
+  .stats-title{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px}
+  .stat-row{display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:5px 0;border-bottom:1px solid #1a1a1a}
+  .stat-row:last-child{border-bottom:none}
+  .stat-row span{color:#666}
+  .stat-row strong{color:#e8e8e0;font-weight:500}
+
+  /* ── DETAIL SHEET ── */
+  #overlay{position:absolute;inset:0;bottom:60px;background:rgba(0,0,0,.65);z-index:900;display:flex;align-items:flex-end;opacity:0;pointer-events:none;transition:opacity .2s;backdrop-filter:blur(2px)}
+  #overlay.show{opacity:1;pointer-events:all}
+  .sheet{width:100%;background:#0f0f0f;border-radius:18px 18px 0 0;padding:12px 20px 32px;border:1px solid #1f1f1f;border-bottom:none;transform:translateY(20px);transition:transform .25s}
+  #overlay.show .sheet{transform:translateY(0)}
+  .handle{width:36px;height:4px;background:#252525;border-radius:2px;margin:0 auto 16px}
+  .sheet-hrow{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+  .badge{padding:4px 12px;border-radius:20px;font-size:11px;font-weight:500;text-transform:capitalize}
+  .close-btn{background:#1a1a1a;border:none;color:#666;width:28px;height:28px;border-radius:50%;cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center}
+  .sheet-date{font-size:15px;font-weight:500;margin:0 0 14px;text-transform:capitalize;color:#e8e8e0}
+  .sheet-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
+  .sstat{background:#1a1a1a;border-radius:10px;padding:11px 13px;display:flex;flex-direction:column;gap:4px}
+  .ss-lbl{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:.5px}
+  .ss-val{font-size:15px;font-weight:500;color:#e8e8e0}
+  .coord-box{background:#1a1a1a;border-radius:10px;padding:11px 13px;display:flex;flex-direction:column;gap:4px}
+  .coord-val{font-size:13px;color:#00e5ff;font-variant-numeric:tabular-nums;letter-spacing:.3px}
+
+  /* ── SPLASH ── */
+  #splash{position:absolute;inset:0;background:#0d0d0d;display:flex;align-items:center;justify-content:center;z-index:9999}
+  .splash-icon{font-size:44px;margin-bottom:12px}
+  .splash-title{font-size:20px;font-weight:700;letter-spacing:6px;color:#00e5ff;margin:0 0 8px}
+  .splash-msg{font-size:12px;color:#555;margin:0 0 16px}
+  .splash-progress-wrap{width:180px;height:3px;background:#1a1a1a;border-radius:2px;overflow:hidden;margin:0 auto 24px}
+  .splash-progress-bar{height:100%;background:#00e5ff;border-radius:2px;transition:width .35s ease;width:0%}
+  .spinner{width:28px;height:28px;margin:0 auto;border:2px solid #1a1a1a;border-top:2px solid #00e5ff;border-radius:50%;animation:spin .75s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* ── MAP LOADING INDICATOR ── */
+  #map-loader{position:absolute;top:12px;right:12px;z-index:600;background:rgba(10,10,10,.88);border:1px solid #1f1f1f;border-radius:8px;padding:6px 11px;display:none;align-items:center;gap:7px;font-size:11px;color:#888}
+  #map-loader.active{display:flex}
+  .ml-spinner{width:12px;height:12px;border:1.5px solid #1a1a1a;border-top:1.5px solid #00e5ff;border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0}
+
+  /* ── TOAST BANNER ── */
+  #toast{position:absolute;top:0;left:0;right:0;z-index:2000;background:#1a1a1a;border-bottom:1px solid #00e5ff33;padding:10px 16px;display:none;align-items:center;justify-content:space-between;gap:10px}
+  #toast.show{display:flex}
+  .toast-msg{font-size:12px;color:#ccc;line-height:1.4;flex:1}
+  .toast-reload{background:#00e5ff18;color:#00e5ff;border:1px solid #00e5ff44;border-radius:8px;padding:5px 12px;font-size:11px;font-weight:500;cursor:pointer;flex-shrink:0;white-space:nowrap}
+
+  /* ── CONFIRM DIALOG ── */
+  #confirm-overlay{position:absolute;inset:0;background:rgba(0,0,0,.75);z-index:3000;display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .2s;padding:24px}
+  #confirm-overlay.show{opacity:1;pointer-events:all}
+  .confirm-box{background:#141414;border:1px solid #2a2a2a;border-radius:16px;padding:24px 20px;width:100%;max-width:340px}
+  .confirm-title{font-size:15px;font-weight:600;color:#e8e8e0;margin:0 0 8px}
+  .confirm-msg{font-size:13px;color:#666;line-height:1.55;margin:0 0 20px}
+  .confirm-btns{display:flex;gap:10px}
+  .confirm-cancel{flex:1;padding:10px;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;color:#888;font-size:13px;cursor:pointer}
+  .confirm-ok{flex:1;padding:10px;background:#ff444418;border:1px solid #ff444455;border-radius:10px;color:#ff6b6b;font-size:13px;font-weight:500;cursor:pointer}
+  .confirm-ok.cyan{background:#00e5ff12;border-color:#00e5ff44;color:#00e5ff}
+
+  /* ── DELETE BUTTON IN SHEET ── */
+  .delete-btn{background:#ff444414;border:1px solid #ff444433;color:#ff6b6b;width:28px;height:28px;border-radius:50%;cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+
+  /* ── DB INFO BOX ── */
+  .db-info-box{background:#0f0f0f;border:1px solid #1f1f1f;border-radius:12px;padding:14px 16px;margin-top:16px}
+  .db-info-title{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}
+  .db-info-row{display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid #181818}
+  .db-info-row:last-child{border-bottom:none}
+  .db-info-row span{color:#555}
+  .db-info-row strong{color:#888;font-weight:500}
+  .version-badge{font-size:10px;color:#333;letter-spacing:1px;text-align:center;padding:14px 0 6px;font-variant-numeric:tabular-nums}
+  .db-danger-zone{margin-top:14px;display:flex;flex-direction:column;gap:8px}
+  .db-btn{width:100%;padding:10px 14px;border-radius:10px;font-size:12px;font-weight:500;cursor:pointer;text-align:left;display:flex;align-items:center;gap:8px}
+  .db-btn-reset{background:#ff444410;border:1px solid #ff444430;color:#ff6b6b}
+  .db-btn-gps{background:#ffd74010;border:1px solid #ffd74030;color:#ffd740}
+  .db-btn-icon{font-size:14px;flex-shrink:0}
+
+    /* ── IMPORT RESULT BOX ── */
+  .import-result{margin-top:12px;padding:10px 14px;background:#131313;border-radius:10px;font-size:12px;line-height:1.8;color:#888;display:none}
+  .import-result.show{display:block}
+  .ir-good{color:#00e5ff}
+  .ir-warn{color:#ffd740}
+
+    /* ── Leaflet overrides ── */
+  .leaflet-control-zoom{border:1px solid #222!important;border-radius:8px!important;overflow:hidden}
+  .leaflet-control-zoom a{background:#111!important;color:#888!important;border-bottom:1px solid #1a1a1a!important;width:30px!important;height:30px!important;line-height:30px!important}
+  .leaflet-control-zoom a:hover{background:#1a1a1a!important;color:#00e5ff!important}
+  .leaflet-control-attribution{display:none}
+</style>
+</head>
+<body>
+<div id="root">
+
+  <!-- SPLASH -->
+  <div id="splash">
+    <div style="text-align:center">
+      <div class="splash-icon">⛰</div>
+      <p class="splash-title">TRAIL ATLAS</p>
+      <p style="font-size:10px;color:#333;letter-spacing:2px;margin:-4px 0 12px">v3.2-api</p>
+      <p class="splash-msg" id="splash-msg">Initialisiere…</p>
+      <div class="splash-progress-wrap">
+        <div class="splash-progress-bar" id="splash-bar"></div>
+      </div>
+      <div class="spinner"></div>
+    </div>
+  </div>
+
+  <!-- TOAST (shown after import) -->
+  <div id="toast">
+    <span class="toast-msg" id="toast-msg"></span>
+    <button class="toast-reload" onclick="location.reload()">↺ Neu laden</button>
+    <button class="toast-reload" style="background:none;border:none;color:#444;font-size:14px;padding:4px 6px" onclick="document.getElementById('toast').classList.remove('show')">✕</button>
+  </div>
+
+  <!-- MAP + LEGEND -->
+  <div id="map"></div>
+  <div id="map-dim"></div>
+  <div id="sel-badge">
+    <span>◉</span>
+    <span id="sel-badge-label"></span>
+    <button id="sel-badge-close" onclick="deselectActivity()" title="Auswahl aufheben">✕</button>
+  </div>
+  <div id="map-loader"><div class="ml-spinner"></div><span id="map-loader-text">Lade…</span></div>
+  <button id="map-style-btn" onclick="toggleStyleMenu()" title="Kartenstil">🗺</button>
+  <div id="map-style-menu">
+    <button class="msm-item active" data-style="dark"      onclick="setMapStyle('dark')">◉ Dark</button>
+    <button class="msm-item"        data-style="topo"      onclick="setMapStyle('topo')">◉ Topo</button>
+    <button class="msm-item"        data-style="satellite" onclick="setMapStyle('satellite')">◉ Satellit</button>
+  </div>
+  <div id="legend"></div>
+
+  <!-- PANEL: TOUREN (4 zones) -->
+  <div id="panel-list" class="panel">
+
+    <!-- Zone 1: Metrics -->
+    <div class="stats-banner">
+      <div class="sb-item"><span class="sb-val" id="sb-total">–</span><span class="sb-lbl">Touren</span></div>
+      <div class="sb-item"><span class="sb-val" id="sb-km">–</span><span class="sb-lbl">Kilometer</span></div>
+      <div class="sb-item"><span class="sb-val" id="sb-time">–</span><span class="sb-lbl">Stunden</span></div>
+    </div>
+
+    <!-- Zone 2: Chart -->
+    <div class="chart-zone">
+      <div class="chart-controls">
+        <span class="cc-label">X</span>
+        <select class="cc-select" id="chart-xaxis" onchange="onXGrainChange()">
+          <option value="year" selected>Jahr</option>
+          <option value="quarter">Quartal</option>
+          <option value="month">Monat</option>
+        </select>
+        <span class="cc-label" style="margin-left:6px">Y</span>
+        <select class="cc-select" id="chart-yaxis" onchange="renderChart()">
+          <option value="count" selected>Anzahl Touren</option>
+          <option value="km">Distanz (km)</option>
+          <option value="hours">Dauer (h)</option>
+        </select>
+      </div>
+      <canvas id="chart-canvas" height="96"></canvas>
+    </div>
+
+    <!-- Zone 3: Filters + Sort (dropdowns) -->
+    <div class="filter-zone">
+      <select class="fz-select" id="type-select" onchange="setTypeFilter(this.value)">
+        <option value="all">Alle Typen</option>
+        <option value="hiking">Wandern</option>
+        <option value="running">Laufen</option>
+        <option value="cycling">Radfahren</option>
+        <option value="stand_up_paddleboarding">SUP</option>
+        <option value="other">Sonstige</option>
+      </select>
+      <select class="fz-select" id="date-select" onchange="setDateFilter(this.value)">
+        <option value="all">Alle Zeiträume</option>
+      </select>
+      <div class="fz-divider"></div>
+      <select class="sort-select" id="sort-select" onchange="applyFilters()">
+        <option value="date-desc">Neueste</option>
+        <option value="date-asc">Älteste</option>
+        <option value="dist-desc">Längste</option>
+        <option value="dur-desc">Längste Dauer</option>
+      </select>
+    </div>
+
+    <!-- Zone 4: Tour list -->
+    <div class="list-scroll" id="list-scroll"></div>
+  </div>
+
+  <!-- PANEL: IMPORT -->
+  <div id="panel-import" class="panel">
+    <div class="panel-header"><span class="panel-title">CSV Import</span></div>
+    <div class="import-body">
+      <p class="import-hint">
+        Lade deine Garmin-Exporte hoch:<br>
+        <strong>activity_summary_*.csv</strong> — Metadaten<br>
+        <strong>all_fit_data_*.csv</strong> — GPS-Punkte<br><br>
+        Daten werden zentral in der Datenbank auf dem Server gespeichert.
+      </p>
+      <label class="upload-btn">
+        <span>↑</span> Dateien auswählen
+        <input type="file" accept=".csv" multiple id="file-input" style="display:none">
+      </label>
+      <div class="prog-wrap" id="prog-wrap"><div class="prog-bar" id="prog-bar"></div></div>
+      <p id="prog-label" class="prog-label"></p>
+      <p id="err-msg" class="err-msg"></p>
+      <div id="import-result" class="import-result"></div>
+      <div class="stats-box" id="stats-box">
+        <p class="stats-title">Datenbank</p>
+        <p class="stat-row"><span>Touren geladen</span><strong id="stat-total">–</strong></p>
+      </div>
+
+      <!-- DB info + danger zone -->
+      <div class="db-info-box">
+        <p class="db-info-title">Datenbank Info</p>
+        <div class="db-info-row"><span>GPS-Punkte</span><strong id="db-pts">–</strong></div>
+        <div class="db-info-row"><span>Letzter Import</span><strong id="db-last-import">–</strong></div>
+        <div class="db-info-row"><span>Touren ohne GPS</span><strong id="db-no-gps">–</strong></div>
+        <div class="db-danger-zone">
+          <button class="db-btn db-btn-gps" onclick="confirmAction('gps')">
+            <span class="db-btn-icon">⚡</span> Nur GPS-Punkte löschen
+          </button>
+          <button class="db-btn db-btn-reset" onclick="confirmAction('all')">
+            <span class="db-btn-icon">🗑</span> Alle Daten zurücksetzen
+          </button>
+        </div>
+      </div>
+      <div class="version-badge">Trail Atlas v3.2-api</div>
+    </div>
+  </div>
+
+  <!-- DETAIL SHEET -->
+  <div id="overlay">
+    <div class="sheet" id="sheet"></div>
+  </div>
+
+  <!-- CONFIRM DIALOG -->
+  <div id="confirm-overlay">
+    <div class="confirm-box">
+      <p class="confirm-title" id="confirm-title">Bist du sicher?</p>
+      <p class="confirm-msg"   id="confirm-msg"></p>
+      <div class="confirm-btns">
+        <button class="confirm-cancel" onclick="confirmCancel()">Abbrechen</button>
+        <button class="confirm-ok"     id="confirm-ok-btn" onclick="confirmOk()">Löschen</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- BOTTOM NAV -->
+  <nav id="nav" data-version="v3.2-api">
+    <button class="nav-btn active" onclick="switchTab('map')">
+      <span class="nav-icon">◉</span><span class="nav-label">Karte</span>
+    </button>
+    <button class="nav-btn" onclick="switchTab('list')">
+      <span class="nav-icon">☰</span><span class="nav-label">Touren</span>
+    </button>
+    <button class="nav-btn" onclick="switchTab('import')">
+      <span class="nav-icon">↑</span><span class="nav-label">Import</span>
+    </button>
+  </nav>
+
+</div>
+
+<script src="/libs/leaflet.js" integrity="LEAFLET_JS_SRI" crossorigin="anonymous"></script>
+<script src="/libs/papaparse.min.js" integrity="PAPAPARSE_SRI" crossorigin="anonymous"></script>
+<!-- Dexie/IndexedDB entfernt – Daten kommen jetzt von der API -->
+<script>
+const SAMPLE_GPS = {"20250706074249": [[47.553548, 12.311213], [47.553677, 12.311365], [47.553778, 12.311674], [47.553803, 12.311704], [47.553814, 12.311932], [47.553743, 12.312247], [47.553695, 12.312408], [47.553655, 12.312542], [47.55363, 12.312838], [47.553567, 12.313123], [47.553529, 12.313274], [47.553479, 12.313333], [47.553451, 12.313647], [47.553272, 12.313766], [47.553169, 12.313802], [47.553091, 12.313687], [47.55305, 12.313602], [47.553051, 12.313687], [47.553058, 12.313837], [47.553035, 12.31393], [47.552987, 12.313987], [47.552919, 12.314059], [47.552811, 12.314135], [47.552757, 12.314096], [47.552663, 12.314072], [47.552555, 12.314069], [47.552511, 12.314098], [47.55247, 12.314136], [47.552357, 12.314142], [47.552283, 12.31412], [47.552175, 12.314133], [47.552139, 12.314135], [47.552122, 12.314053], [47.552173, 12.313814], [47.552225, 12.313675], [47.5523, 12.313513], [47.552394, 12.31342], [47.55244, 12.313316], [47.552433, 12.313252], [47.552445, 12.313215], [47.552478, 12.312917], [47.552492, 12.312745], [47.55248, 12.312622], [47.552391, 12.312415], [47.552354, 12.31238], [47.552317, 12.312303], [47.552248, 12.312239], [47.552154, 12.312157], [47.552121, 12.312032], [47.552102, 12.312019], [47.552029, 12.311961], [47.551949, 12.311892], [47.551805, 12.311815], [47.551769, 12.311701], [47.551698, 12.311606], [47.55162, 12.311506], [47.551545, 12.311417], [47.551511, 12.311241], [47.551505, 12.311203], [47.551447, 12.311324], [47.551425, 12.311331], [47.551347, 12.311418], [47.551287, 12.311537], [47.551225, 12.311666], [47.551216, 12.311775], [47.551253, 12.311859], [47.551345, 12.311999], [47.551362, 12.31208], [47.55136, 12.312127], [47.551301, 12.312147], [47.551261, 12.312176], [47.551249, 12.312271], [47.55121, 12.312378], [47.551155, 12.312469], [47.551098, 12.312568], [47.551057, 12.312698], [47.550972, 12.312838], [47.550941, 12.312904], [47.550949, 12.312966], [47.550931, 12.313038], [47.550875, 12.313092], [47.550796, 12.313246], [47.550709, 12.313348], [47.550648, 12.313419], [47.550575, 12.313482], [47.550502, 12.31349], [47.550444, 12.313536], [47.550319, 12.313612], [47.550242, 12.313656], [47.550148, 12.313727], [47.550082, 12.313828], [47.550052, 12.313706], [47.550055, 12.313497], [47.550066, 12.313369], [47.550074, 12.313257], [47.550089, 12.313081], [47.550091, 12.312946], [47.550086, 12.312893], [47.550088, 12.312795], [47.550095, 12.312693], [47.550131, 12.312639], [47.550134, 12.312564], [47.550124, 12.312389], [47.550009, 12.312141], [47.549908, 12.311954], [47.549871, 12.311788], [47.549801, 12.311692], [47.549779, 12.31153], [47.549759, 12.3114], [47.549666, 12.311225], [47.5496, 12.311166], [47.549584, 12.311323], [47.549461, 12.311393], [47.549414, 12.311462], [47.549344, 12.311607], [47.549275, 12.311759], [47.549194, 12.31192], [47.549139, 12.311988], [47.549071, 12.312111], [47.548952, 12.312037], [47.548822, 12.311934], [47.548764, 12.311782], [47.548711, 12.311667], [47.548622, 12.311435], [47.548576, 12.311283], [47.548537, 12.311277], [47.548478, 12.311254], [47.548318, 12.311306], [47.548199, 12.311369], [47.548054, 12.311539], [47.548019, 12.311695], [47.547943, 12.311856], [47.547859, 12.312002], [47.547819, 12.312154], [47.547804, 12.312251], [47.547771, 12.312365], [47.547717, 12.31255], [47.54762, 12.312677], [47.547596, 12.312786], [47.547553, 12.31281], [47.547494, 12.312889], [47.547405, 12.313042], [47.547337, 12.313175], [47.547305, 12.31331], [47.547224, 12.313508], [47.547235, 12.313645], [47.547285, 12.313812], [47.547264, 12.313921], [47.54726, 12.314018], [47.547235, 12.314332], [47.547182, 12.314453], [47.547222, 12.314602], [47.547266, 12.314819], [47.547249, 12.315011], [47.547252, 12.315292], [47.547136, 12.315389], [47.546991, 12.315547], [47.546925, 12.315612], [47.54685, 12.31568], [47.546728, 12.315802], [47.54658, 12.315858], [47.546509, 12.31591], [47.546361, 12.315885], [47.546299, 12.315897], [47.546239, 12.315957], [47.546151, 12.316092], [47.546071, 12.316236], [47.545834, 12.316442], [47.545592, 12.316582], [47.545476, 12.316687], [47.545298, 12.316831], [47.545181, 12.316931], [47.545093, 12.317014], [47.545013, 12.317065], [47.54491, 12.317037], [47.544832, 12.317067], [47.544793, 12.317087], [47.544625, 12.317143], [47.544506, 12.317189], [47.544416, 12.317194], [47.544268, 12.317243], [47.544154, 12.317218], [47.544044, 12.317256], [47.543983, 12.317238], [47.543817, 12.317316], [47.543672, 12.317331], [47.543577, 12.317341], [47.543454, 12.317333], [47.543388, 12.317354], [47.543284, 12.317326], [47.54317, 12.31729], [47.543033, 12.317307], [47.542839, 12.317258], [47.542745, 12.317192], [47.542603, 12.317082], [47.542519, 12.317008], [47.542337, 12.317024], [47.542251, 12.317177], [47.542181, 12.317221], [47.542072, 12.317343], [47.542021, 12.31742], [47.541957, 12.317495], [47.54193, 12.317568], [47.541883, 12.317696], [47.541811, 12.317814], [47.541764, 12.317871], [47.54171, 12.317924], [47.54165, 12.318018], [47.541612, 12.318112], [47.541571, 12.318189], [47.541535, 12.318343], [47.541451, 12.318561], [47.541404, 12.31875], [47.541386, 12.31877], [47.541279, 12.31898], [47.541165, 12.31907]], "20240925181045": [[48.161652, 11.540445], [48.161419, 11.540271], [48.161142, 11.539911], [48.161152, 11.539275], [48.161135, 11.538518], [48.161159, 11.538058], [48.161092, 11.5376], [48.16099, 11.536956], [48.160863, 11.536283], [48.160709, 11.53543], [48.160548, 11.534547], [48.160262, 11.534441], [48.159948, 11.534082], [48.159953, 11.533082], [48.159936, 11.532341], [48.159908, 11.53139], [48.159888, 11.5306], [48.159796, 11.530181], [48.159503, 11.529625], [48.159488, 11.528801], [48.159264, 11.527847], [48.159233, 11.526946], [48.159194, 11.525815], [48.159143, 11.524727], [48.159113, 11.523901], [48.159074, 11.522885], [48.159039, 11.521915], [48.158996, 11.520899], [48.158962, 11.519818], [48.158937, 11.518926], [48.158887, 11.517931], [48.158857, 11.516758], [48.158815, 11.515522], [48.158773, 11.514521], [48.158756, 11.513696], [48.158687, 11.512681], [48.158733, 11.511918], [48.158664, 11.510855], [48.158594, 11.509925], [48.158584, 11.508851], [48.158881, 11.508185], [48.158879, 11.50736], [48.158961, 11.506197], [48.158933, 11.505172], [48.158866, 11.504079], [48.158503, 11.503182], [48.15867, 11.502314], [48.15861, 11.50109], [48.158567, 11.500155], [48.158545, 11.499241], [48.158341, 11.498363], [48.158285, 11.497387], [48.158235, 11.496277], [48.158209, 11.495275], [48.158191, 11.494591], [48.158144, 11.493407], [48.158088, 11.492721], [48.157527, 11.492683], [48.1576, 11.493463], [48.157665, 11.494628], [48.157665, 11.495446], [48.157714, 11.496636], [48.157743, 11.49747], [48.157772, 11.498614], [48.157656, 11.499564], [48.157718, 11.500473], [48.157766, 11.501414], [48.157784, 11.502445], [48.157975, 11.503293], [48.157724, 11.504194], [48.157687, 11.505182], [48.157742, 11.50607], [48.157782, 11.507134], [48.157959, 11.508045], [48.158026, 11.508777], [48.158265, 11.509924], [48.158267, 11.510755], [48.158242, 11.511219], [48.15833, 11.511889], [48.158485, 11.512304], [48.158543, 11.513346], [48.158587, 11.514345], [48.158623, 11.515268], [48.158671, 11.516272], [48.158665, 11.51744], [48.158686, 11.518238], [48.15872, 11.518986], [48.158737, 11.519924], [48.158783, 11.520518], [48.158809, 11.52175], [48.158819, 11.522341], [48.158844, 11.523346], [48.158915, 11.524264], [48.158913, 11.52542], [48.159136, 11.525724], [48.159241, 11.526632], [48.159267, 11.527449], [48.1595, 11.528311], [48.159688, 11.529455], [48.159761, 11.529822], [48.159964, 11.530814], [48.159954, 11.531667], [48.159959, 11.532548], [48.160018, 11.533224], [48.159943, 11.533972], [48.160126, 11.534119], [48.160348, 11.534459], [48.160757, 11.535325], [48.160933, 11.536059], [48.161049, 11.53675], [48.161127, 11.537327], [48.161237, 11.538224], [48.161183, 11.539009], [48.160996, 11.539767], [48.161254, 11.540123]], "20250626135557": [[44.485241, 6.550255], [44.485022, 6.550319], [44.484876, 6.550265], [44.484669, 6.550261], [44.484435, 6.550245], [44.48439, 6.550246], [44.48437, 6.550207], [44.484216, 6.55024], [44.48405, 6.550232], [44.484027, 6.550191], [44.483835, 6.550203], [44.483598, 6.550179], [44.483442, 6.55021], [44.483302, 6.550243], [44.48318, 6.550257], [44.483185, 6.550265], [44.483099, 6.55026], [44.48294, 6.550312], [44.482817, 6.55033], [44.48264, 6.550383], [44.48239, 6.550456], [44.482176, 6.550424], [44.481855, 6.550362], [44.481748, 6.550377], [44.481569, 6.550346], [44.481481, 6.550322], [44.481344, 6.550285], [44.481142, 6.550309], [44.480973, 6.550342], [44.480678, 6.550208], [44.480389, 6.550226], [44.480175, 6.550202], [44.480014, 6.550094], [44.479896, 6.549997], [44.479737, 6.549932], [44.479593, 6.54991], [44.479473, 6.549892], [44.479172, 6.549891], [44.478961, 6.549897], [44.478764, 6.549859], [44.478569, 6.549797], [44.478342, 6.549702], [44.478142, 6.549666], [44.477967, 6.549606], [44.47783, 6.549579], [44.477687, 6.549527], [44.477541, 6.549387], [44.477417, 6.549315], [44.477322, 6.549281], [44.477192, 6.54927], [44.47715, 6.549224], [44.47708, 6.5492], [44.476792, 6.549126], [44.476462, 6.549048], [44.476116, 6.548778], [44.475812, 6.548595], [44.475327, 6.548442], [44.474921, 6.548379], [44.474461, 6.548217], [44.474377, 6.548131], [44.474125, 6.548006], [44.473923, 6.547992], [44.473749, 6.547979], [44.473521, 6.547972], [44.473236, 6.547856], [44.473117, 6.54765], [44.473009, 6.547574], [44.47287, 6.547478], [44.472743, 6.54751], [44.472605, 6.547606], [44.472475, 6.547704], [44.472387, 6.547809], [44.472202, 6.547927], [44.472021, 6.547905], [44.471909, 6.547852], [44.47177, 6.547867], [44.47165, 6.547875], [44.471509, 6.547938], [44.471438, 6.547981], [44.471337, 6.548057], [44.471228, 6.548091], [44.47111, 6.548123], [44.471052, 6.548137], [44.470928, 6.548226], [44.470763, 6.548398], [44.470511, 6.548586], [44.470444, 6.548612], [44.470319, 6.5487], [44.470133, 6.548681], [44.469862, 6.548634], [44.469673, 6.54866], [44.469507, 6.548653], [44.469314, 6.548664], [44.469133, 6.548704], [44.46903, 6.548703], [44.46888, 6.548565], [44.468839, 6.548513], [44.468816, 6.548483], [44.468613, 6.548253], [44.46854, 6.548008], [44.468526, 6.547864], [44.468472, 6.547718], [44.468479, 6.547643], [44.468418, 6.547501], [44.468363, 6.547345], [44.468342, 6.547259], [44.468311, 6.547135], [44.468341, 6.547], [44.46832, 6.546876], [44.468345, 6.546781], [44.468353, 6.546572], [44.468329, 6.546432], [44.46837, 6.546157], [44.468496, 6.546038], [44.468561, 6.545887], [44.468515, 6.545892], [44.468411, 6.545869], [44.468317, 6.545813], [44.468168, 6.545843], [44.468058, 6.545951], [44.467964, 6.545935], [44.467871, 6.545932], [44.467798, 6.545932], [44.467745, 6.546055], [44.467711, 6.546183], [44.467689, 6.546354], [44.467583, 6.546538], [44.467456, 6.546659], [44.467405, 6.54681], [44.467366, 6.546995], [44.467283, 6.547078], [44.467243, 6.547284], [44.467178, 6.54742], [44.467174, 6.547532], [44.467133, 6.547701], [44.467085, 6.54777], [44.466959, 6.548072], [44.466891, 6.548218], [44.466835, 6.548337], [44.466793, 6.548509], [44.466754, 6.548698], [44.466727, 6.548846], [44.466712, 6.549044], [44.466807, 6.549221], [44.46679, 6.549344], [44.466661, 6.549407], [44.466563, 6.549454], [44.466461, 6.549521], [44.466357, 6.549576], [44.466279, 6.54969], [44.466197, 6.549829], [44.466112, 6.549966], [44.466074, 6.550158], [44.466069, 6.550177], [44.466069, 6.550198], [44.466083, 6.550243], [44.466016, 6.550249], [44.465955, 6.55009], [44.465901, 6.549954], [44.465829, 6.549804], [44.465802, 6.549579], [44.465818, 6.549299], [44.465797, 6.549117], [44.465778, 6.548991], [44.465793, 6.54887], [44.465782, 6.54864], [44.465812, 6.548412], [44.465853, 6.548167], [44.465855, 6.547963], [44.465921, 6.547717], [44.465937, 6.547587], [44.465987, 6.547344], [44.46603, 6.547188], [44.466075, 6.546979], [44.466058, 6.546746], [44.466073, 6.546607], [44.466101, 6.546449], [44.466121, 6.546397], [44.466183, 6.546038], [44.466281, 6.545826], [44.466349, 6.545631], [44.466539, 6.545405], [44.466743, 6.545365], [44.466914, 6.54523], [44.466957, 6.545087], [44.466946, 6.544851], [44.466937, 6.544582], [44.466956, 6.544498], [44.466994, 6.544288], [44.467057, 6.544053], [44.467124, 6.543794], [44.46721, 6.543559], [44.467283, 6.5432], [44.467371, 6.543032], [44.467519, 6.542983], [44.46751, 6.542944], [44.467402, 6.543176], [44.467309, 6.543359], [44.467258, 6.543557], [44.467201, 6.543772], [44.467073, 6.544106], [44.466996, 6.544342], [44.467037, 6.544693], [44.467055, 6.544767], [44.466957, 6.545111], [44.466769, 6.545391], [44.466535, 6.545441], [44.466397, 6.54557], [44.46634, 6.545804], [44.466227, 6.546149], [44.466122, 6.546397], [44.466104, 6.546548], [44.466113, 6.546729], [44.466085, 6.546867], [44.466093, 6.547062], [44.466056, 6.547299], [44.466031, 6.547524], [44.466027, 6.547668], [44.465947, 6.54792], [44.465924, 6.547908], [44.465911, 6.547967], [44.465896, 6.548419], [44.465845, 6.548723], [44.465848, 6.548813], [44.465841, 6.549018], [44.465778, 6.549142], [44.465687, 6.549253], [44.465573, 6.549374], [44.465488, 6.54949], [44.465423, 6.549703], [44.465405, 6.549831], [44.465416, 6.549933], [44.465352, 6.550203], [44.465312, 6.55035], [44.465317, 6.550509], [44.465285, 6.55067], [44.465253, 6.550835], [44.465236, 6.551007], [44.465229, 6.551145], [44.465212, 6.55131], [44.465132, 6.551458], [44.465078, 6.55156], [44.465025, 6.551654], [44.464959, 6.551842], [44.464908, 6.551991], [44.464877, 6.552162], [44.464841, 6.552343], [44.464818, 6.552479], [44.464789, 6.552508], [44.464826, 6.552627], [44.464833, 6.552798], [44.464783, 6.552876], [44.464673, 6.553004], [44.464574, 6.553104], [44.464515, 6.553257], [44.464417, 6.553427], [44.464314, 6.553522], [44.464247, 6.553665], [44.464179, 6.553787], [44.464073, 6.55386], [44.463981, 6.553896], [44.463899, 6.554011], [44.463815, 6.554191], [44.463727, 6.554272], [44.46375, 6.554387], [44.463629, 6.554475], [44.46361, 6.554555], [44.463559, 6.55466], [44.46348, 6.554749], [44.463391, 6.554821], [44.463318, 6.554878], [44.463204, 6.554979], [44.463095, 6.555043], [44.463025, 6.555092], [44.462952, 6.55514], [44.462845, 6.555216], [44.462677, 6.555098], [44.462529, 6.554884], [44.462521, 6.554878], [44.462514, 6.554896], [44.462325, 6.554744], [44.462214, 6.554675], [44.462127, 6.554682], [44.46195, 6.554696], [44.461726, 6.554904], [44.461654, 6.554998], [44.461552, 6.555085], [44.461372, 6.555207], [44.46118, 6.555442], [44.461095, 6.555527], [44.460908, 6.555654], [44.460832, 6.555725], [44.460615, 6.555835], [44.460421, 6.555924], [44.460206, 6.556027], [44.460145, 6.556052], [44.460119, 6.556069], [44.460115, 6.556077], [44.459908, 6.556042], [44.459781, 6.556065], [44.459693, 6.556185], [44.45962, 6.556302], [44.459562, 6.556429], [44.459497, 6.556508], [44.459434, 6.55658], [44.459388, 6.556669], [44.459335, 6.556739], [44.459271, 6.556834], [44.459196, 6.556887], [44.459062, 6.557058], [44.458925, 6.557091], [44.458862, 6.557121], [44.458815, 6.557166], [44.458705, 6.557236], [44.458435, 6.557353], [44.45827, 6.557452], [44.458189, 6.557524], [44.458124, 6.55757], [44.458049, 6.557651], [44.457976, 6.557745], [44.457883, 6.557879], [44.457806, 6.557966], [44.457718, 6.558064], [44.4576, 6.558259], [44.457482, 6.558354], [44.45739, 6.558366], [44.457297, 6.55829], [44.457258, 6.558262], [44.457146, 6.558241], [44.457049, 6.558241], [44.457007, 6.558252], [44.456892, 6.558214], [44.456852, 6.558201], [44.456836, 6.558202], [44.456716, 6.558207], [44.456595, 6.558182], [44.456512, 6.558205], [44.456391, 6.558196], [44.456288, 6.558232], [44.456172, 6.558282], [44.456115, 6.558312], [44.456006, 6.558349], [44.455878, 6.558404], [44.455746, 6.558424], [44.455696, 6.55841], [44.455536, 6.558453], [44.455508, 6.558458], [44.455321, 6.558505], [44.455194, 6.558524], [44.454982, 6.558563], [44.454811, 6.55859], [44.454714, 6.558646], [44.454532, 6.558708], [44.454535, 6.558778], [44.454519, 6.558871], [44.454473, 6.559036], [44.454322, 6.559142], [44.454219, 6.5591], [44.454215, 6.559104], [44.454062, 6.559062], [44.453959, 6.559049], [44.453861, 6.559022], [44.453831, 6.559034], [44.453817, 6.559027], [44.453617, 6.559029], [44.453533, 6.559102], [44.453381, 6.559191], [44.453237, 6.559265], [44.453133, 6.559274], [44.45307, 6.559303], [44.453005, 6.559335], [44.452976, 6.55929], [44.452842, 6.55922], [44.452822, 6.559189], [44.452698, 6.558995], [44.452614, 6.558681], [44.452573, 6.558607], [44.452767, 6.557544], [44.452778, 6.557552], [44.452982, 6.55755], [44.45308, 6.557586], [44.453171, 6.557614], [44.453286, 6.557632], [44.453412, 6.557688], [44.45359, 6.557811], [44.453587, 6.557813], [44.453784, 6.557929], [44.453893, 6.55806], [44.454005, 6.558176], [44.454101, 6.558252], [44.454258, 6.558349], [44.454411, 6.55851], [44.454494, 6.558622], [44.45458, 6.558721], [44.454618, 6.558689], [44.45484, 6.558542], [44.454942, 6.558521], [44.45531, 6.558481], [44.455673, 6.558372], [44.455882, 6.558381], [44.455978, 6.558305], [44.456079, 6.558276], [44.456226, 6.558223], [44.456337, 6.558164], [44.456438, 6.558137], [44.45655, 6.558113], [44.456602, 6.558112], [44.457078, 6.558269], [44.457166, 6.558209], [44.457249, 6.558195], [44.457301, 6.558222], [44.457362, 6.55827], [44.457495, 6.558489], [44.457603, 6.558529], [44.45767, 6.558548], [44.457762, 6.558638], [44.457872, 6.558748], [44.457975, 6.558845], [44.458076, 6.558909], [44.45826, 6.559005], [44.458448, 6.559156], [44.458584, 6.5592], [44.458751, 6.559276], [44.458775, 6.559286], [44.458795, 6.559297], [44.458898, 6.55915], [44.459222, 6.55903], [44.459335, 6.558911], [44.459539, 6.558698], [44.459724, 6.558567], [44.459809, 6.558498], [44.459907, 6.558377], [44.459997, 6.558307], [44.460152, 6.558334], [44.460332, 6.558289], [44.460544, 6.558293], [44.460831, 6.558289], [44.460991, 6.55828], [44.461127, 6.558268], [44.461249, 6.55823], [44.461336, 6.558233], [44.461495, 6.558176], [44.46162, 6.558108], [44.461675, 6.55806], [44.461796, 6.558003], [44.461833, 6.557989], [44.461846, 6.557996], [44.461853, 6.557999], [44.462014, 6.558065], [44.462119, 6.558091], [44.462271, 6.558161], [44.462403, 6.558186], [44.462473, 6.558208], [44.462607, 6.558247], [44.462859, 6.558308], [44.463067, 6.558334], [44.463254, 6.558392], [44.463372, 6.558369], [44.46347, 6.558397], [44.463572, 6.558488], [44.463708, 6.558524], [44.463909, 6.558564], [44.464135, 6.558523], [44.46424, 6.558484], [44.464407, 6.558494], [44.464566, 6.558576], [44.46473, 6.558555], [44.46495, 6.558505], [44.46515, 6.558494], [44.465366, 6.558473], [44.46548, 6.558446], [44.465567, 6.558325], [44.465605, 6.558259], [44.46571, 6.558209], [44.465808, 6.558097], [44.466016, 6.557976], [44.466103, 6.557881], [44.46625, 6.557784], [44.466417, 6.557708], [44.466551, 6.557585], [44.466671, 6.557373], [44.466794, 6.557309], [44.466903, 6.55736], [44.467036, 6.557367], [44.467124, 6.557249], [44.467139, 6.557303], [44.467328, 6.557298], [44.46753, 6.557246], [44.467781, 6.557076], [44.467971, 6.557022], [44.4682, 6.556863], [44.468359, 6.556771], [44.46858, 6.556729], [44.468859, 6.556634], [44.46909, 6.556525], [44.46929, 6.556424], [44.469402, 6.556481], [44.469438, 6.556442], [44.46981, 6.556382], [44.470029, 6.556342], [44.470297, 6.556225], [44.470398, 6.555976], [44.470489, 6.555838], [44.470607, 6.555739], [44.470738, 6.555722], [44.470846, 6.555478], [44.470936, 6.555267], [44.471067, 6.554961], [44.471219, 6.554746], [44.471307, 6.554623], [44.471405, 6.554476], [44.47156, 6.554298], [44.471703, 6.554429], [44.471807, 6.554491], [44.471901, 6.554571], [44.47198, 6.554776], [44.472048, 6.554878], [44.472081, 6.554972], [44.472159, 6.555091], [44.472203, 6.55523], [44.472279, 6.555292], [44.472349, 6.555445], [44.472407, 6.555487], [44.47249, 6.555455], [44.472563, 6.555441], [44.472645, 6.555419], [44.472742, 6.555402], [44.472855, 6.555497], [44.472909, 6.555643], [44.473068, 6.555877], [44.473148, 6.556024], [44.473213, 6.556133], [44.473272, 6.556219], [44.473366, 6.556289], [44.473515, 6.556387], [44.473531, 6.556363], [44.473689, 6.556417], [44.473869, 6.556548], [44.473961, 6.556566], [44.474067, 6.556639], [44.474175, 6.556664], [44.474255, 6.556635], [44.474387, 6.556608], [44.474496, 6.556584], [44.474652, 6.556598], [44.474798, 6.556632], [44.474923, 6.556697], [44.475041, 6.556747], [44.475235, 6.556756], [44.475316, 6.556748], [44.475309, 6.556739], [44.475181, 6.556601], [44.475106, 6.556422], [44.475006, 6.556331], [44.474957, 6.55621], [44.475081, 6.556018], [44.47512, 6.555996], [44.475241, 6.555857], [44.475394, 6.555673], [44.475534, 6.555631], [44.475722, 6.555599], [44.475846, 6.555553], [44.475968, 6.555562], [44.476154, 6.555531], [44.476236, 6.555526], [44.476381, 6.555567], [44.476535, 6.555628], [44.476604, 6.555623], [44.476529, 6.555509], [44.476438, 6.555421], [44.476293, 6.555317], [44.476166, 6.55516], [44.47601, 6.554883], [44.475913, 6.554702], [44.47582, 6.554593], [44.475696, 6.554468], [44.475591, 6.554354], [44.475476, 6.554271], [44.475219, 6.554187], [44.475046, 6.554209], [44.474918, 6.554179], [44.474852, 6.554182], [44.474734, 6.554126], [44.474566, 6.55405], [44.474414, 6.55393], [44.474342, 6.553868], [44.474245, 6.553714], [44.474134, 6.553603], [44.474173, 6.553512], [44.474313, 6.553423], [44.474435, 6.553337], [44.47456, 6.553261], [44.474677, 6.553256], [44.474746, 6.553254], [44.474755, 6.553235], [44.474977, 6.553157], [44.475053, 6.553111], [44.475194, 6.553077], [44.475366, 6.553098], [44.475412, 6.553147], [44.475446, 6.553182], [44.475574, 6.553295], [44.475719, 6.553386], [44.475943, 6.553412], [44.476199, 6.553442], [44.47633, 6.553431], [44.476518, 6.553446], [44.476648, 6.553437], [44.476777, 6.553511], [44.476966, 6.553657], [44.477095, 6.553776], [44.477283, 6.553877], [44.477456, 6.553942], [44.477519, 6.553939], [44.477615, 6.553924], [44.477885, 6.553908], [44.478061, 6.553946], [44.478214, 6.55392], [44.478323, 6.553971], [44.478528, 6.553982], [44.47875, 6.554133], [44.478965, 6.554238], [44.479053, 6.554265], [44.479061, 6.554285], [44.479115, 6.554323], [44.479223, 6.554323], [44.479294, 6.554146], [44.479475, 6.554164], [44.479545, 6.554216], [44.479701, 6.554287], [44.479784, 6.554358], [44.479834, 6.554449], [44.479896, 6.554519], [44.479965, 6.554576], [44.480081, 6.554614], [44.480193, 6.554673], [44.480326, 6.554739], [44.480329, 6.554731], [44.480471, 6.554806], [44.480638, 6.554907], [44.4808, 6.554952], [44.480879, 6.555032], [44.480934, 6.555124], [44.48098, 6.555256], [44.481059, 6.555466], [44.48108, 6.555589], [44.481129, 6.555684], [44.481128, 6.555695], [44.481125, 6.555687], [44.481141, 6.555502], [44.481214, 6.555543], [44.481284, 6.555604], [44.481316, 6.555683], [44.481372, 6.555842], [44.481413, 6.555866], [44.481406, 6.555852], [44.481469, 6.55565], [44.481626, 6.555452], [44.481677, 6.555413], [44.481734, 6.555158], [44.481756, 6.55503], [44.481761, 6.554929], [44.48158, 6.554969], [44.4815, 6.554957], [44.481443, 6.554881], [44.481491, 6.554929], [44.481726, 6.554972], [44.481919, 6.555024], [44.482044, 6.555061], [44.482205, 6.554934], [44.482387, 6.554843], [44.48254, 6.554726], [44.482578, 6.554425], [44.482564, 6.554235], [44.482447, 6.553915], [44.482545, 6.553698], [44.482624, 6.55361], [44.482754, 6.553435], [44.482826, 6.5533], [44.482771, 6.553042], [44.482752, 6.552872], [44.482742, 6.55262], [44.482755, 6.552506], [44.48274, 6.552495], [44.482598, 6.552373], [44.482467, 6.552293], [44.482209, 6.552239], [44.482098, 6.552203], [44.481832, 6.552155], [44.481621, 6.552202], [44.481482, 6.552201], [44.481319, 6.552086], [44.48154, 6.551946], [44.481856, 6.551928], [44.482045, 6.551882], [44.482264, 6.551833], [44.482352, 6.551822], [44.482605, 6.551756], [44.482811, 6.551728], [44.482998, 6.551728], [44.483192, 6.551714], [44.483403, 6.551732], [44.483675, 6.551854], [44.483748, 6.551864], [44.48378, 6.551792], [44.483899, 6.55189], [44.483898, 6.551794], [44.4839, 6.551789], [44.483905, 6.551745], [44.483878, 6.551667], [44.483882, 6.551617], [44.483935, 6.551486], [44.483957, 6.551367], [44.484002, 6.551083], [44.484009, 6.551087], [44.484029, 6.550941], [44.484097, 6.550857], [44.484167, 6.550743], [44.484213, 6.550677], [44.484252, 6.550596], [44.484274, 6.550603], [44.48428, 6.550544], [44.484355, 6.550406], [44.484424, 6.550362], [44.484459, 6.550332], [44.484447, 6.550262], [44.484677, 6.550198], [44.484839, 6.550225], [44.485, 6.550188], [44.485159, 6.550135], [44.485265, 6.550085]], "20241106033045": [[20.868269, 107.210362], [20.86852, 107.210554], [20.868784, 107.21062], [20.868968, 107.210671], [20.869187, 107.21051], [20.8694, 107.21029], [20.869621, 107.209945], [20.869663, 107.209642], [20.869471, 107.209177], [20.869008, 107.208778], [20.868687, 107.208533], [20.868575, 107.208451], [20.868548, 107.208408], [20.86828, 107.20835], [20.867783, 107.208311], [20.867393, 107.208251], [20.867039, 107.208181], [20.866757, 107.207969], [20.866518, 107.207843], [20.866415, 107.207735], [20.866284, 107.207602], [20.865985, 107.207272], [20.865835, 107.207094], [20.865666, 107.206958], [20.86546, 107.206698], [20.865315, 107.206456], [20.865147, 107.206143], [20.864878, 107.205942], [20.86456, 107.205654], [20.864397, 107.205287], [20.864443, 107.204987], [20.864558, 107.204812], [20.864642, 107.204443], [20.864778, 107.204068], [20.864826, 107.203932], [20.86491, 107.203627], [20.865099, 107.203437], [20.865339, 107.203379], [20.8656, 107.203289], [20.865743, 107.203254], [20.866002, 107.203237], [20.866194, 107.20317], [20.866413, 107.203117], [20.866686, 107.203044], [20.86694, 107.203009], [20.867085, 107.202974], [20.867382, 107.20288], [20.867691, 107.202683], [20.867909, 107.202504], [20.868077, 107.202339], [20.868219, 107.202218], [20.868311, 107.201988], [20.868361, 107.20179], [20.868404, 107.201494], [20.868397, 107.201256], [20.868315, 107.200992], [20.868134, 107.201008], [20.868103, 107.201015], [20.86808, 107.201031], [20.867931, 107.201047], [20.867723, 107.201091], [20.867559, 107.201046], [20.867287, 107.201073], [20.867441, 107.201078], [20.867362, 107.201122], [20.867415, 107.201174], [20.867566, 107.201148], [20.8676, 107.201157], [20.867678, 107.201142], [20.864586, 107.20452], [20.864487, 107.204767], [20.864391, 107.205016], [20.864343, 107.20523], [20.864432, 107.205432], [20.864535, 107.205552], [20.864642, 107.205684], [20.864756, 107.20584], [20.864879, 107.206017], [20.86507, 107.20624], [20.865295, 107.206427], [20.865505, 107.206585], [20.865627, 107.206623], [20.865728, 107.20664], [20.865961, 107.206621], [20.866401, 107.206508], [20.866558, 107.206422], [20.866564, 107.206412], [20.866597, 107.206391], [20.866598, 107.206415], [20.866582, 107.206407]]};
+
+const SAMPLE_SUMMARY = [
+  {activity_id:"20240925181045",activity_type:"running",start_date:"2024-09-25 17:31:08",end_date:"2024-09-25 18:10:04",start_lat:48.161652,start_lng:11.540445},
+  {activity_id:"20241106033045",activity_type:"stand_up_paddleboarding",start_date:"2024-11-06 02:14:29",end_date:"2024-11-06 03:30:40",start_lat:20.868268,start_lng:107.210362},
+  {activity_id:"20250626135557",activity_type:"hiking",start_date:"2025-06-26 08:20:22",end_date:"2025-06-26 13:53:44",start_lat:44.485241,start_lng:6.550255},
+  {activity_id:"20250706074249",activity_type:"hiking",start_date:"2025-07-06 06:27:48",end_date:"2025-07-06 07:36:33",start_lat:47.553547,start_lng:12.311213},
+];
+// ── SAMPLE DATA injected above ────────────────────────────────────────────────
+
+const TYPE_COLORS = {
+  hiking:"#00e5ff", running:"#ff6d00", cycling:"#76ff03",
+  stand_up_paddleboarding:"#ff4081", swimming:"#aa00ff", default:"#ffd740"
+};
+const getColor = t => TYPE_COLORS[t] || TYPE_COLORS.default;
+
+// ── XSS-Safe HTML escaping ────────────────────────────────────────────────────
+// All CSV-sourced fields must pass through this before use in innerHTML
+const _esc = {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
+function escHtml(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/[&<>"']/g, c => _esc[c]);
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function haversineKm(pts) {
+  let d = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const R = 6371, toR = Math.PI/180;
+    const dLat = (pts[i].lat - pts[i-1].lat)*toR;
+    const dLng = (pts[i].lng - pts[i-1].lng)*toR;
+    const a = Math.sin(dLat/2)**2 +
+      Math.cos(pts[i-1].lat*toR)*Math.cos(pts[i].lat*toR)*Math.sin(dLng/2)**2;
+    d += R*2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  }
+  return d;
+}
+const fmtKm  = km  => km >= 10 ? km.toFixed(1)+" km" : km.toFixed(2)+" km";
+const fmtDate= d   => new Date(d).toLocaleDateString("de-DE",{weekday:"long",day:"2-digit",month:"long",year:"numeric"});
+const fmtDS  = d   => new Date(d).toLocaleDateString("de-DE",{day:"2-digit",month:"short",year:"numeric"});
+const fmtTime= d   => new Date(d).toLocaleTimeString("de-DE",{hour:"2-digit",minute:"2-digit"});
+function fmtDur(s,e){const ms=new Date(e)-new Date(s);const h=Math.floor(ms/3600000);const m=Math.floor((ms%3600000)/60000);return h>0?`${h}h ${m}m`:`${m}m`}
+const durMs  = (s,e)=> new Date(e)-new Date(s);
+
+// ── State ─────────────────────────────────────────────────────────────────────
+// ── API Configuration ─────────────────────────────────────────────────────────
+const APP_VERSION = "v3.2-api";
+const API_BASE = "/api";
+console.log("Trail Atlas " + APP_VERSION);   // Nginx proxied to FastAPI on port 8000
+
+async function apiFetch(path, options={}) {
+  const res = await fetch(API_BASE + path, {
+    credentials: "include",   // sends Basic Auth session cookie / header
+    ...options
+  });
+  if (!res.ok) {
+    const msg = await res.text().catch(()=>"");
+    throw new Error(`API ${res.status}: ${msg || res.statusText}`);
+  }
+  return res.json();
+}
+
+let map, tileLayer, canvasRenderer, polylines=[], markers=[], activities=[], activityDists={}, currentTab="map";
+let activeType="all", activeDateKey="all", activeSort="date-desc";
+let mapFitted=false, currentStyle="dark";
+let selectedActivityId=null; // currently selected/highlighted track
+const KNOWN_TYPES = new Set(["hiking","running","cycling","stand_up_paddleboarding","swimming"]);
+
+const MAP_STYLES = {
+  dark:      {url:"https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", maxZoom:19},
+  topo:      {url:"https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",             maxZoom:17},
+  satellite: {url:"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", maxZoom:19}
+};
+
+// "other" = all types not in KNOWN_TYPES
+function typeMatches(actType, filterVal) {
+  if (filterVal === "all")   return true;
+  if (filterVal === "other") return !KNOWN_TYPES.has(actType);
+  return actType === filterVal;
+}
+
+// ── API: Verbindung prüfen ────────────────────────────────────────────────────
+async function checkApiHealth() {
+  try {
+    const data = await apiFetch("/health");
+    if (data.status !== "ok") throw new Error("API nicht bereit");
+  } catch(e) {
+    throw new Error("Server nicht erreichbar. Bitte prüfe die Verbindung zur VM. (" + e.message + ")");
+  }
+}
+
+// ── MAP ───────────────────────────────────────────────────────────────────────
+function initMap() {
+  // Single shared canvas renderer for all polylines – vastly faster than SVG
+  // tolerance: simplification in canvas units (higher = fewer points drawn)
+  canvasRenderer = L.canvas({ padding: 0.5, tolerance: 5 });
+  map = L.map("map",{zoomControl:false, attributionControl:false, preferCanvas:true, renderer:canvasRenderer});
+  const s = MAP_STYLES[currentStyle];
+  tileLayer = L.tileLayer(s.url,{maxZoom:s.maxZoom}).addTo(map);
+  L.control.zoom({position:"bottomright"}).addTo(map);
+  // Update marker visibility on zoom
+  map.on("zoomend", updateMarkerVisibility);
+  // Click on empty map area → deselect
+  map.on("click", () => {
+    if (selectedActivityId) {
+      deselectActivity();
+      closeSheet();
+    }
+  });
+}
+
+// ── MAP STYLE SWITCHER ────────────────────────────────────────────────────────
+function toggleStyleMenu() {
+  document.getElementById("map-style-menu").classList.toggle("open");
+}
+function setMapStyle(style) {
+  if (style === currentStyle) { toggleStyleMenu(); return; }
+  currentStyle = style;
+  localStorage.setItem("mapStyle", style);
+  const s = MAP_STYLES[style];
+  tileLayer.setUrl(s.url);
+  tileLayer.options.maxZoom = s.maxZoom;
+  // Dim bright tile layers so tracks stay prominent
+  document.getElementById("map-dim").classList.toggle("dimmed", style !== "dark");
+  document.querySelectorAll(".msm-item").forEach(b =>
+    b.classList.toggle("active", b.dataset.style === style));
+  document.getElementById("map-style-menu").classList.remove("open");
+}
+// Close style menu on map click
+document.addEventListener("click", e => {
+  if (!e.target.closest("#map-style-btn") && !e.target.closest("#map-style-menu"))
+    document.getElementById("map-style-menu")?.classList.remove("open");
+});
+
+// ── RENDER TRACKS: only filtered, adaptive thinning, progressive batches ──────
+const MAX_RENDER_PTS = 10000;
+const MARKER_ZOOM_THRESHOLD = 11; // markers only visible at zoom >= this
+
+async function renderTracks(fitView = false) {
+  // Clear polylines + markers
+  polylines.forEach(p=>p.remove()); polylines=[];
+  markers.forEach(m=>m.remove());   markers=[];
+
+  const filtered = getFiltered();
+  if (!filtered.length) { renderLegend([]); return; }
+
+  const loader     = document.getElementById("map-loader");
+  const loaderText = document.getElementById("map-loader-text");
+  loader.classList.add("active");
+  loaderText.textContent = `0 / ${filtered.length} Touren`;
+
+  const allLL=[], usedTypes=new Set();
+  const BATCH = 15;
+  let totalPtsEstimate = 0;
+
+  for (let i = 0; i < filtered.length; i += BATCH) {
+    const batch = filtered.slice(i, i + BATCH);
+
+    for (const act of batch) {
+      let pts;
+      try {
+        const gpsData = await apiFetch(`/activities/${encodeURIComponent(act.activity_id)}/gps`);
+        pts = gpsData.points.map(([lat,lng]) => ({lat, lng}));
+      } catch(e) {
+        console.warn("GPS fetch failed for", act.activity_id, e.message);
+        continue;
+      }
+      if (pts.length < 2) continue;
+
+      if (!activityDists[act.activity_id]) activityDists[act.activity_id] = haversineKm(pts);
+      totalPtsEstimate += pts.length;
+      usedTypes.add(act.activity_type);
+
+      const baseStep   = Math.max(1, Math.floor(pts.length / 300));
+      const globalStep = totalPtsEstimate > MAX_RENDER_PTS
+        ? Math.ceil(totalPtsEstimate / MAX_RENDER_PTS) : 1;
+      const step = Math.max(baseStep, globalStep);
+
+      const lls = pts.filter((_,j)=>j%step===0).map(p=>[p.lat,p.lng]);
+      allLL.push(...lls);
+
+      const c    = getColor(act.activity_type);
+      // Determine initial visual state based on selection
+      const isSel  = selectedActivityId && act.activity_id === selectedActivityId;
+      const isDim  = selectedActivityId && act.activity_id !== selectedActivityId;
+      const weight  = isSel ? 7 : 5;
+      const opacity = isDim ? 0.18 : 0.85;
+      const color   = isDim ? "#555" : c;
+
+      const poly = L.polyline(lls,{color, weight, opacity, lineCap:"round", renderer:canvasRenderer}).addTo(map);
+      poly._actId = act.activity_id;
+      poly._baseColor = c;
+      poly.on("click", ()=>selectActivity(act));
+      // Hover: re-read current dim state at call time so it stays correct after selection changes
+      poly.on("mouseover",()=>{
+        const dimNow = selectedActivityId && poly._actId !== selectedActivityId;
+        if (!dimNow) poly.setStyle({weight: selectedActivityId && poly._actId===selectedActivityId ? 11 : 9, opacity:1});
+      });
+      poly.on("mouseout",()=>{
+        const selNow = selectedActivityId && poly._actId === selectedActivityId;
+        const dimNow = selectedActivityId && poly._actId !== selectedActivityId;
+        poly.setStyle({weight: selNow?7:5, opacity: dimNow?0.18:0.85});
+      });
+      polylines.push(poly);
+
+      // Start marker
+      const icon = L.divIcon({
+        className: "",
+        html: `<div class="start-marker" style="background:${isDim?"#555":c};opacity:${isDim?0.3:1}"></div>`,
+        iconSize: [17,17], iconAnchor: [8,8]
+      });
+      const marker = L.marker([act.start_lat, act.start_lng], {icon, zIndexOffset:100});
+      marker.on("click", ()=>selectActivity(act));
+      marker._actId = act.activity_id;
+      markers.push(marker);
+    }
+
+    loaderText.textContent = `${Math.min(i+BATCH, filtered.length)} / ${filtered.length} Touren`;
+    await new Promise(r => setTimeout(r, 0));
+  }
+
+  loader.classList.remove("active");
+
+  // Fit view: only on explicit request AND only when result set is small enough
+  if (fitView && allLL.length && filtered.length <= 100) {
+    if (!mapFitted) {
+      map.fitBounds(L.latLngBounds(allLL), {padding:[40,40]});
+      mapFitted = true;
+    } else {
+      map.flyToBounds(L.latLngBounds(allLL), {padding:[40,40], duration:0.6, maxZoom:14});
+    }
+  } else if (!mapFitted && allLL.length) {
+    map.fitBounds(L.latLngBounds(allLL), {padding:[40,40]});
+    mapFitted = true;
+  }
+
+  renderLegend([...usedTypes]);
+  updateMarkerVisibility();
+  updateSelBadge();
+}
+
+// Show/hide markers based on current zoom level
+function updateMarkerVisibility() {
+  const zoom = map.getZoom();
+  const show = zoom >= MARKER_ZOOM_THRESHOLD;
+  markers.forEach(m => {
+    if (show) { if (!map.hasLayer(m)) m.addTo(map); }
+    else       { if (map.hasLayer(m)) m.remove(); }
+  });
+}
+
+function renderLegend(types) {
+  const el = document.getElementById("legend");
+  if (!types.length) { el.innerHTML=""; return; }
+  el.innerHTML = types.map(t=>
+    `<div class="leg-row"><div class="leg-line" style="background:${getColor(t)}"></div>${escHtml(t.replace(/_/g," "))}</div>`
+  ).join("");
+}
+
+// ── FILTERING ─────────────────────────────────────────────────────────────────
+// Build date bucket key for a given granularity
+function dateBucket(dateStr, grain) {
+  const d = new Date(dateStr);
+  const y = d.getFullYear();
+  if (grain==="year")    return String(y);
+  if (grain==="quarter") return `${y}-Q${Math.floor(d.getMonth()/3)+1}`;
+  if (grain==="month")   return `${y}-${String(d.getMonth()+1).padStart(2,"0")}`;
+  return String(y);
+}
+
+// Build sorted list of date-period chips from current activities
+function buildDateChips() {
+  const xGrain = document.getElementById("chart-xaxis").value;
+  const buckets = new Map();
+  for (const a of activities) {
+    const key = dateBucket(a.start_date, xGrain);
+    if (!buckets.has(key)) buckets.set(key, key);
+  }
+  const sorted = [...buckets.keys()].sort();
+  return sorted;
+}
+
+function refreshDateChips() {
+  // Rebuild date-select dropdown options
+  const sel = document.getElementById("date-select");
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = '<option value="all">Alle Zeiträume</option>';
+  const periods = buildDateChips();
+  for (const p of periods) {
+    const opt = document.createElement("option");
+    opt.value = p; opt.textContent = p;
+    if (p === activeDateKey) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  if (!periods.includes(prev)) activeDateKey = "all";
+}
+
+function setTypeFilter(type) {
+  activeType = type;
+  applyFilters(true);
+}
+
+function setDateFilter(key) {
+  activeDateKey = key;
+  applyFilters(true);
+}
+
+function getFiltered() {
+  const xGrain = document.getElementById("chart-xaxis") ? document.getElementById("chart-xaxis").value : "month";
+  return activities.filter(a => {
+    const typeOk = typeMatches(a.activity_type, activeType);
+    const dateOk = activeDateKey==="all" || dateBucket(a.start_date, xGrain)===activeDateKey;
+    return typeOk && dateOk;
+  });
+}
+
+function getSorted(list) {
+  const s = document.getElementById("sort-select").value;
+  return [...list].sort((a,b)=>{
+    if (s==="date-desc") return new Date(b.start_date)-new Date(a.start_date);
+    if (s==="date-asc")  return new Date(a.start_date)-new Date(b.start_date);
+    if (s==="dist-desc") return (activityDists[b.activity_id]||0)-(activityDists[a.activity_id]||0);
+    if (s==="dur-desc")  return durMs(b.start_date,b.end_date||b.start_date)-durMs(a.start_date,a.end_date||a.start_date);
+    return 0;
+  });
+}
+
+async function applyFilters(fitView=false, keepSelection=false) {
+  // Reset selection on filter change unless explicitly kept
+  if (!keepSelection) selectedActivityId = null;
+  const filtered = getFiltered();
+  const sorted   = getSorted(filtered);
+  updateBanner(filtered);
+  renderListCards(sorted);
+  renderChart();
+  await renderTracks(fitView);
+  updateBanner(getFiltered());
+}
+
+// ── STATS BANNER ──────────────────────────────────────────────────────────────
+function updateBanner(list) {
+  const noData = activities.length === 0;
+  const km  = list.reduce((s,a)=>s+(activityDists[a.activity_id]||0),0);
+  const ms  = list.reduce((s,a)=>s+(a.end_date?durMs(a.start_date,a.end_date):0),0);
+  document.getElementById("sb-total").textContent = noData ? "n/a" : list.length;
+  document.getElementById("sb-km").textContent    = noData ? "n/a" : (km > 0 ? km.toFixed(1) : "–");
+  document.getElementById("sb-time").textContent  = noData ? "n/a" : (ms > 0 ? (ms/3600000).toFixed(1) : "–");
+}
+
+// ── CHART ─────────────────────────────────────────────────────────────────────
+// Called when X-grain selector changes: reset date filter + rebuild chips + redraw
+function onXGrainChange() {
+  activeDateKey = "all";
+  const sel = document.getElementById("date-select");
+  if (sel) sel.value = "all";
+  refreshDateChips();
+  renderChart();
+  applyFilters(true);
+}
+
+function renderChart() {
+  const canvas = document.getElementById("chart-canvas");
+  const ctx    = canvas.getContext("2d");
+  const xGrain = document.getElementById("chart-xaxis").value;
+  const yMetric= document.getElementById("chart-yaxis").value;
+
+  // Use type-filtered only (not date-filtered) so chart always shows full timeline
+  const base = activeType==="all" ? activities : activities.filter(a=>a.activity_type===activeType);
+
+  // Aggregate into buckets
+  const map_ = new Map();
+  for (const a of base) {
+    const key = dateBucket(a.start_date, xGrain);
+    const cur = map_.get(key) || {count:0, km:0, hours:0};
+    cur.count++;
+    cur.km    += activityDists[a.activity_id]||0;
+    cur.hours += a.end_date ? durMs(a.start_date,a.end_date)/3600000 : 0;
+    map_.set(key, cur);
+  }
+  const labels = [...map_.keys()].sort();
+  const values = labels.map(l => {
+    const v = map_.get(l);
+    return yMetric==="count" ? v.count : yMetric==="km" ? parseFloat(v.km.toFixed(1)) : parseFloat(v.hours.toFixed(1));
+  });
+
+  if (!labels.length) {
+    const W = canvas.parentElement.clientWidth - 28;
+    canvas.width = W; canvas.height = 96;
+    ctx.clearRect(0,0,W,96);
+    ctx.fillStyle = "#2a2a2a";
+    ctx.font = "12px 'DM Sans','Segoe UI',sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(activities.length === 0 ? "Keine Daten vorhanden" : "Kein Ergebnis für diesen Filter", W/2, 48);
+    return;
+  }
+
+  // Canvas sizing
+  const W    = canvas.parentElement.clientWidth - 28;
+  const H    = 96;   // slightly taller to fit per-bar labels
+  const padB = 18;   // space for x-axis labels
+  const padT = 14;   // space above bars for value labels
+  canvas.width  = W;
+  canvas.height = H;
+  ctx.clearRect(0,0,W,H);
+
+  const maxV  = Math.max(...values, 1);
+  const barW  = Math.max(4, Math.floor((W - labels.length*3) / labels.length));
+  const gap   = Math.max(2, Math.floor(W / labels.length) - barW);
+  const total = barW + gap;
+  const availH = H - padB - padT;
+
+  canvas._bars = [];
+
+  for (let i = 0; i < labels.length; i++) {
+    const x  = i * total;
+    const v  = values[i];
+    const bh = Math.max(2, Math.round((v / maxV) * availH));
+    const y  = H - padB - bh;
+
+    const isActive = activeDateKey !== "all" && labels[i] === activeDateKey;
+    ctx.fillStyle = isActive ? "#00e5ff" : "#00e5ff55";
+    ctx.beginPath();
+    ctx.roundRect(x, y, barW, bh, [2,2,0,0]);
+    ctx.fill();
+
+    // Value label above each bar (skip if bar too narrow to show text)
+    if (v > 0 && barW >= 8) {
+      const valStr = yMetric==="count" ? String(v) : v.toFixed(1);
+      ctx.fillStyle = isActive ? "#00e5ff" : "#aaa";
+      ctx.font = `${barW >= 20 ? 11 : 10}px 'DM Sans','Segoe UI',sans-serif`;
+      ctx.textAlign = "center";
+      ctx.fillText(valStr, x + barW/2, y - 3);
+    }
+
+    canvas._bars[i] = {x, w: barW, label: labels[i]};
+  }
+
+  // X-axis labels — spaced to avoid overlap
+  ctx.fillStyle = "#888";
+  ctx.font = "10px 'DM Sans','Segoe UI',sans-serif";
+  ctx.textAlign = "center";
+  const step = Math.max(1, Math.ceil(labels.length / 7));
+  for (let i = 0; i < labels.length; i += step) {
+    ctx.fillText(labels[i], i*total + barW/2, H - 4);
+  }
+  // Always show last label if not already shown
+  const lastI = labels.length - 1;
+  if (lastI % step !== 0)
+    ctx.fillText(labels[lastI], lastI*total + barW/2, H - 4);
+}
+
+// Chart click → set date filter
+document.getElementById("chart-canvas").addEventListener("click", function(e) {
+  const rect = this.getBoundingClientRect();
+  const x    = e.clientX - rect.left;
+  const bars = this._bars || [];
+  for (const b of bars) {
+    if (x >= b.x && x <= b.x + b.w) { setDateFilter(b.label); return; }
+  }
+});
+
+// ── LIST RENDERING ────────────────────────────────────────────────────────────
+function renderListCards(list) {
+  if (activities.length === 0) {
+    document.getElementById("list-scroll").innerHTML =
+      `<div style="padding:40px 20px;text-align:center;color:#444;font-size:13px;line-height:1.8">
+        <div style="font-size:32px;margin-bottom:12px">📭</div>
+        Keine Touren in der Datenbank.<br>
+        <span style="color:#333;font-size:12px">Lade CSV-Dateien im Tab Import hoch.</span>
+      </div>`;
+    return;
+  }
+  if (list.length === 0) {
+    document.getElementById("list-scroll").innerHTML =
+      `<div style="padding:40px 20px;text-align:center;color:#444;font-size:13px">
+        Keine Touren für diesen Filter.
+      </div>`;
+    return;
+  }
+  document.getElementById("list-scroll").innerHTML = list.map(a => {
+    const dist = activityDists[a.activity_id];
+    return `<button class="list-card" onclick="openActivity('${escHtml(a.activity_id)}')">
+      <span class="dot" style="background:${getColor(a.activity_type)}"></span>
+      <div class="lc-body">
+        <span class="lc-title">${escHtml(fmtDS(a.start_date))}</span>
+        <span class="lc-sub">${escHtml(a.activity_type.replace(/_/g," "))}${a.end_date?" · "+escHtml(fmtDur(a.start_date,a.end_date)):""}</span>
+      </div>
+      ${dist ? `<span class="lc-dist">${escHtml(fmtKm(dist))}</span>` : ""}
+      <span class="chevron">›</span>
+    </button>`;
+  }).join("");
+}
+
+function openActivity(id) {
+  const act = activities.find(a=>a.activity_id===id);
+  if (act) showSheet(act);
+}
+
+// ── FULL LIST REFRESH (called after API changes) ─────────────────────────────
+async function refreshAll() {
+  try {
+    activities = await apiFetch("/activities");
+  } catch(e) {
+    showApiError("Touren konnten nicht geladen werden: " + e.message);
+    activities = [];
+  }
+  renderImportStats();
+  refreshDateChips();
+  await applyFilters();
+}
+
+function showApiError(msg) {
+  const err = document.getElementById("err-msg");
+  if (err) { err.textContent = msg; err.style.display = "block"; }
+  else alert(msg);
+}
+
+function renderImportStats() {
+  const types={};
+  for (const a of activities) types[a.activity_type]=(types[a.activity_type]||0)+1;
+  const box = document.getElementById("stats-box");
+  box.innerHTML = `<p class="stats-title">Datenbank</p>
+    <p class="stat-row"><span>Touren geladen</span><strong id="stat-total">${activities.length}</strong></p>`
+    +Object.entries(types).map(([t,n])=>
+      `<p class="stat-row"><span style="color:${getColor(t)}">● ${escHtml(t.replace(/_/g," "))}</span><strong>${n}</strong></p>`
+    ).join("");
+  refreshDbInfo();
+}
+
+async function refreshDbInfo() {
+  try {
+    const stats = await apiFetch("/db/stats");
+    const el = id => document.getElementById(id);
+    if (el("db-pts"))         el("db-pts").textContent         = stats.gps_points.toLocaleString("de-DE");
+    if (el("db-last-import")) el("db-last-import").textContent = localStorage.getItem("lastImport") || "–";
+    if (el("db-no-gps"))      el("db-no-gps").textContent      = stats.activities_no_gps;
+  } catch(e) {
+    console.warn("DB stats fetch failed:", e.message);
+  }
+}
+
+// ── SELECTION ────────────────────────────────────────────────────────────────
+function selectActivity(act) {
+  selectedActivityId = act.activity_id;
+  applySelectionStyles();
+  updateSelBadge();
+  showSheet(act);
+}
+
+function deselectActivity() {
+  selectedActivityId = null;
+  applySelectionStyles();
+  updateSelBadge();
+}
+
+// Restyle all polylines in one RAF batch – avoids per-element SVG repaints.
+// With the canvas renderer this is a single canvas redraw instead of N repaints.
+let _rafPending = false;
+function applySelectionStyles() {
+  if (_rafPending) return;
+  _rafPending = true;
+  requestAnimationFrame(() => {
+    _rafPending = false;
+    polylines.forEach(poly => {
+      const id    = poly._actId;
+      const isSel = selectedActivityId && id === selectedActivityId;
+      const isDim = selectedActivityId && id !== selectedActivityId;
+      const c     = poly._baseColor;
+      const w     = isSel ? 7 : 5;
+      poly.setStyle({
+        color:   isDim ? "#555" : c,
+        weight:  w,
+        opacity: isDim ? 0.18 : 0.85
+      });
+      // Hover handlers read selectedActivityId at call-time, no rebind needed
+    });
+    // Marker opacity
+    markers.forEach(m => {
+      const isDim = selectedActivityId && m._actId !== selectedActivityId;
+      const el = m.getElement();
+      if (el) el.style.opacity = isDim ? "0.2" : "1";
+    });
+  });
+}
+
+function updateSelBadge() {
+  const badge = document.getElementById("sel-badge");
+  if (!badge) return;
+  if (!selectedActivityId) {
+    badge.classList.remove("show");
+    return;
+  }
+  const act = activities.find(a=>a.activity_id===selectedActivityId);
+  if (!act) { badge.classList.remove("show"); return; }
+  const label = fmtDS(act.start_date) + " · " + act.activity_type.replace(/_/g," ");
+  document.getElementById("sel-badge-label").textContent = label;
+  // Badge only visible on map tab
+  if (currentTab === "map") badge.classList.add("show");
+  else badge.classList.remove("show");
+}
+
+// ── DETAIL SHEET ──────────────────────────────────────────────────────────────
+async function showSheet(act) {
+  const c = getColor(act.activity_type);
+  if (!activityDists[act.activity_id]) {
+    try {
+      const gpsData = await apiFetch(`/activities/${encodeURIComponent(act.activity_id)}/gps`);
+      const pts2 = gpsData.points.map(([lat,lng]) => ({lat,lng}));
+      if (pts2.length > 1) activityDists[act.activity_id] = haversineKm(pts2);
+    } catch(e) { console.warn("GPS fetch for sheet failed:", e.message); }
+  }
+  const dist = activityDists[act.activity_id];
+  // Mark this activity as selected (styles applied in applySelectionStyles)
+  selectedActivityId = act.activity_id;
+  applySelectionStyles();
+  updateSelBadge();
+
+  // "Auf Karte zeigen" only shown when we're NOT already on the map tab
+  const showMapBtn = currentTab !== "map";
+
+  document.getElementById("sheet").innerHTML=`
+    <div class="handle"></div>
+    <div class="sheet-hrow">
+      <span class="badge" style="background:${c}22;color:${c}">${escHtml(act.activity_type.replace(/_/g," "))}</span>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="delete-btn" onclick="confirmDeleteActivity('${escHtml(act.activity_id)}')" title="Tour löschen">🗑</button>
+        <button class="close-btn"  onclick="closeSheet()">✕</button>
+      </div>
+    </div>
+    <p class="sheet-date">${escHtml(fmtDate(act.start_date))}</p>
+    <div class="sheet-grid">
+      <div class="sstat"><span class="ss-lbl">Start</span><span class="ss-val">${escHtml(fmtTime(act.start_date))}</span></div>
+      <div class="sstat"><span class="ss-lbl">Ende</span><span class="ss-val">${act.end_date?escHtml(fmtTime(act.end_date)):"–"}</span></div>
+      <div class="sstat"><span class="ss-lbl">Dauer</span><span class="ss-val">${act.end_date?escHtml(fmtDur(act.start_date,act.end_date)):"–"}</span></div>
+      <div class="sstat"><span class="ss-lbl">Distanz</span><span class="ss-val" style="color:#00e5ff">${dist?escHtml(fmtKm(dist)):"–"}</span></div>
+    </div>
+    <div class="coord-box">
+      <span class="ss-lbl">Startpunkt</span>
+      <span class="coord-val">${escHtml(Number(act.start_lat).toFixed(5))}° N &nbsp;·&nbsp; ${escHtml(Number(act.start_lng).toFixed(5))}° E</span>
+    </div>
+    ${showMapBtn ? `<button class="show-on-map-btn" onclick="showOnMap('${escHtml(act.activity_id)}')">◉ Auf Karte zeigen</button>` : ""}`;
+  document.getElementById("overlay").classList.add("show");
+}
+function closeSheet(){ document.getElementById("overlay").classList.remove("show"); }
+document.getElementById("overlay").addEventListener("click", e=>{ if(e.target.id==="overlay") closeSheet(); });
+
+// ── SHOW ON MAP ───────────────────────────────────────────────────────────────
+function showOnMap(id) {
+  closeSheet();
+  switchTab("map");
+  // Zoom to this track's polyline bounds
+  const poly = polylines.find(p=>p._actId===id);
+  if (poly) {
+    const bounds = poly.getBounds();
+    if (bounds.isValid()) map.flyToBounds(bounds, {padding:[40,40], duration:0.5, maxZoom:15});
+  }
+}
+
+// ── TAB SWITCH ────────────────────────────────────────────────────────────────
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll(".nav-btn").forEach((b,i)=>{
+    b.classList.toggle("active",["map","list","import"][i]===tab);
+  });
+  document.getElementById("panel-list").classList.toggle("active", tab==="list");
+  document.getElementById("panel-import").classList.toggle("active", tab==="import");
+  // Legend + map-style button: only visible on map tab
+  document.getElementById("legend").classList.toggle("map-active", tab==="map");
+  document.getElementById("map-style-btn").classList.toggle("map-active", tab==="map");
+  document.getElementById("map-style-menu").classList.remove("open");
+  // Selection badge only visible on map tab
+  const badge = document.getElementById("sel-badge");
+  if (badge) badge.classList.toggle("show", tab==="map" && !!selectedActivityId);
+  if (tab==="map") setTimeout(()=>map&&map.invalidateSize(),50);
+  if (tab==="list") setTimeout(()=>renderChart(), 50);
+}
+
+// ── CSV VALIDATION ───────────────────────────────────────────────────────────
+const SUMMARY_REQUIRED = ["activity_id","activity_type","start_date","start_latitude","start_longitude"];
+const GPS_REQUIRED     = ["activity_id","latitude","longitude"];
+const MAX_FILE_MB      = 200;
+
+function validateCsvColumns(headers, required, label) {
+  const missing = required.filter(c => !headers.includes(c));
+  if (missing.length) throw new Error(`${label}: Pflichtfelder fehlen: ${missing.join(", ")}`);
+}
+
+function validateSummaryRow(r) {
+  if (!r.activity_id || !r.activity_id.trim())       return "Leere activity_id";
+  if (!r.start_date  || !r.start_date.trim())        return "Leeres start_date";
+  const d = new Date(r.start_date);
+  if (isNaN(d.getTime()))                            return `Ungültiges Datum: ${r.start_date}`;
+  const lat = parseFloat(r.start_latitude);
+  const lng = parseFloat(r.start_longitude);
+  if (isNaN(lat) || lat < -90  || lat > 90)          return `Ungültige Latitude: ${r.start_latitude}`;
+  if (isNaN(lng) || lng < -180 || lng > 180)         return `Ungültige Longitude: ${r.start_longitude}`;
+  return null;
+}
+
+function validateGpsRow(r) {
+  const lat = parseFloat(r.latitude);
+  const lng = parseFloat(r.longitude);
+  if (isNaN(lat) || lat < -90  || lat > 90)  return false;
+  if (isNaN(lng) || lng < -180 || lng > 180) return false;
+  if (!r.activity_id || !r.activity_id.trim()) return false;
+  return true;
+}
+
+// ── CONFIRM DIALOG ────────────────────────────────────────────────────────────
+let _confirmCallback = null;
+
+function showConfirm(title, msg, okLabel, okClass, cb) {
+  document.getElementById("confirm-title").textContent   = title;
+  document.getElementById("confirm-msg").textContent     = msg;
+  const btn = document.getElementById("confirm-ok-btn");
+  btn.textContent  = okLabel;
+  btn.className    = "confirm-ok" + (okClass === "cyan" ? " cyan" : "");
+  _confirmCallback = cb;
+  document.getElementById("confirm-overlay").classList.add("show");
+}
+function confirmCancel() {
+  document.getElementById("confirm-overlay").classList.remove("show");
+  _confirmCallback = null;
+}
+function confirmOk() {
+  document.getElementById("confirm-overlay").classList.remove("show");
+  if (_confirmCallback) { _confirmCallback(); _confirmCallback = null; }
+}
+
+// ── DB MANAGEMENT ─────────────────────────────────────────────────────────────
+function confirmAction(type) {
+  if (type === "all") {
+    showConfirm(
+      "Alle Daten löschen",
+      "Alle Touren und GPS-Punkte werden unwiderruflich aus der Datenbank entfernt.",
+      "Alles löschen", "red",
+      async () => {
+        try {
+          await apiFetch("/db/reset", {method:"DELETE"});
+          localStorage.removeItem("lastImport");
+          activityDists = {}; mapFitted = false; selectedActivityId = null;
+          await refreshAll();
+          await renderTracks(false);
+        } catch(e) { showApiError("Reset fehlgeschlagen: " + e.message); }
+      }
+    );
+  } else {
+    showConfirm(
+      "GPS-Punkte löschen",
+      "Alle GPS-Punkte werden gelöscht. Touren-Metadaten bleiben erhalten. Tracks sind erst nach erneutem GPS-Import sichtbar.",
+      "GPS löschen", "red",
+      async () => {
+        try {
+          await apiFetch("/db/gps", {method:"DELETE"});
+          activityDists = {}; mapFitted = false; selectedActivityId = null;
+          await refreshAll();
+          await renderTracks(false);
+        } catch(e) { showApiError("GPS-Löschung fehlgeschlagen: " + e.message); }
+      }
+    );
+  }
+}
+
+async function confirmDeleteActivity(id) {
+  const act = activities.find(a=>a.activity_id===id);
+  if (!act) return;
+  const label = escHtml(fmtDS(act.start_date)) + " · " + escHtml(act.activity_type.replace(/_/g," "));
+  showConfirm(
+    "Tour löschen",
+    `"${label}" und alle zugehörigen GPS-Punkte werden dauerhaft gelöscht.`,
+    "Tour löschen", "red",
+    async () => {
+      try {
+        await apiFetch(`/activities/${encodeURIComponent(id)}`, {method:"DELETE"});
+        delete activityDists[id];
+        closeSheet();
+        await refreshAll();
+        await renderTracks(false);
+      } catch(e) { showApiError("Löschen fehlgeschlagen: " + e.message); }
+    }
+  );
+}
+
+// ── CSV IMPORT ────────────────────────────────────────────────────────────────
+document.getElementById("file-input").addEventListener("change", async function() {
+  const files = Array.from(this.files);
+  if (!files.length) return;
+  const err=document.getElementById("err-msg");
+  const pw=document.getElementById("prog-wrap");
+  const pb=document.getElementById("prog-bar");
+  const pl=document.getElementById("prog-label");
+  err.style.display="none"; pw.style.display="block"; pl.style.display="block"; pb.style.width="0%";
+
+  let sumFile, fitFile;
+  for (const f of files) {
+    if (f.name.includes("activity_summary")) sumFile=f;
+    if (f.name.includes("all_fit_data"))     fitFile=f;
+  }
+  if (!sumFile && !fitFile) {
+    err.textContent="Keine erkannte Datei gefunden. Erwartet: activity_summary_*.csv oder all_fit_data_*.csv";
+    err.style.display="block"; pw.style.display="none"; pl.style.display="none"; return;
+  }
+  try {
+    // ── Summary CSV → POST /api/import/summary ──────────────────────────────
+    if (sumFile) {
+      if (sumFile.size > MAX_FILE_MB * 1024 * 1024)
+        throw new Error(`Datei zu groß (>${MAX_FILE_MB} MB): ${sumFile.name}`);
+      pl.textContent="Lade Aktivitäten hoch…"; pb.style.width="10%";
+      const fd = new FormData();
+      fd.append("file", sumFile);
+      const res = await apiFetch("/import/summary", {method:"POST", body:fd});
+      pb.style.width="40%";
+      window._sumImportStats = res;
+    }
+
+    // ── GPS CSV → POST /api/import/gps ──────────────────────────────────────
+    if (fitFile) {
+      if (fitFile.size > MAX_FILE_MB * 1024 * 1024)
+        throw new Error(`Datei zu groß (>${MAX_FILE_MB} MB): ${fitFile.name}`);
+      pl.textContent="Lade GPS-Punkte hoch (kann dauern)…"; pb.style.width="45%";
+      const fd = new FormData();
+      fd.append("file", fitFile);
+      const res = await apiFetch("/import/gps", {method:"POST", body:fd});
+      pb.style.width="95%";
+      window._gpsImportStats = res;
+    }
+
+    pb.style.width="100%"; pl.textContent="Fertig!";
+    activityDists={}; mapFitted=false;
+    localStorage.setItem("lastImport", new Date().toLocaleString("de-DE",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"}));
+
+    // ── Quality report ──────────────────────────────────────────────────────
+    const resultBox = document.getElementById("import-result");
+    resultBox.classList.add("show");
+    const lines = [];
+    if (sumFile && window._sumImportStats) {
+      const s = window._sumImportStats;
+      lines.push(`<span class="ir-good">✓ ${escHtml(String(s.imported))} Aktivitäten importiert</span>`);
+      if (s.skipped > 0)
+        lines.push(`<span class="ir-warn">⚠ ${escHtml(String(s.skipped))} Zeilen übersprungen (ungültig/doppelt)</span>`);
+      if (s.duplicates > 0)
+        lines.push(`<span class="ir-warn">⚠ ${escHtml(String(s.duplicates))} Duplikate in Datei</span>`);
+    }
+    if (fitFile && window._gpsImportStats) {
+      const g = window._gpsImportStats;
+      lines.push(`<span class="ir-good">✓ ${escHtml(g.imported.toLocaleString("de-DE"))} GPS-Punkte importiert</span>`);
+      if (g.skipped > 0)
+        lines.push(`<span class="ir-warn">⚠ ${escHtml(String(g.skipped))} GPS-Zeilen übersprungen</span>`);
+    }
+    if (!fitFile)
+      lines.push(`<span class="ir-warn">ℹ GPS-Datei fehlt – Tracks erst nach GPS-Import sichtbar</span>`);
+    resultBox.innerHTML = lines.join("<br>");
+
+    document.getElementById("toast-msg").textContent =
+      "Import abgeschlossen. Lade die App neu um alle Daten zu sehen.";
+    document.getElementById("toast").classList.add("show");
+
+    await refreshAll();
+    await renderTracks(true);
+    setTimeout(()=>{pw.style.display="none";pl.style.display="none"},1200);
+  } catch(e) {
+    err.textContent="Fehler: "+e.message; err.style.display="block";
+    pw.style.display="none"; pl.style.display="none";
+  }
+  this.value="";
+});
+
+// ── BOOT ──────────────────────────────────────────────────────────────────────
+function setSplash(msg, pct) {
+  document.getElementById("splash-msg").textContent = msg;
+  if (pct !== undefined) {
+    const bar = document.getElementById("splash-bar");
+    if (bar) bar.style.width = pct + "%";
+  }
+}
+
+async function boot() {
+  setSplash("Starte App…", 5);
+  setSplash("Verbinde mit Server…", 15);
+  await checkApiHealth();
+  setSplash("Lade Einstellungen…", 30);
+  // Restore saved map style
+  const saved = localStorage.getItem("mapStyle");
+  if (saved && MAP_STYLES[saved]) {
+    currentStyle = saved;
+    document.querySelectorAll(".msm-item").forEach(b=>
+      b.classList.toggle("active", b.dataset.style===saved));
+    if (saved !== "dark")
+      document.getElementById("map-dim").classList.add("dimmed");
+  }
+  setSplash("Initialisiere Karte…", 65);
+  initMap();
+  setSplash("Lade Touren…", 75);
+  await refreshAll();
+  setSplash("Rendere Tracks…", 88);
+  await renderTracks(true);
+  setSplash("Fertig", 100);
+  // Short pause so user sees 100% before splash disappears
+  await new Promise(r => setTimeout(r, 200));
+  document.getElementById("splash").style.display="none";
+  document.getElementById("legend").classList.add("map-active");
+  document.getElementById("map-style-btn").classList.add("map-active");
+}
+
+boot().catch(e=>{ setSplash("Fehler: "+e.message); console.error(e); });
+</script>
+</body>
+</html>

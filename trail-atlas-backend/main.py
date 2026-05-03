@@ -49,13 +49,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Trail Atlas API",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url=None,
-    # WICHTIG: redirect_slashes=False verhindert dass DELETE/POST mit
-    # Trailing-Slash zu 307 Redirect führen (Browser/Clients verlieren dabei
-    # die Methode → "405 Method Not Allowed").
     redirect_slashes=False,
 )
 
@@ -93,7 +90,7 @@ def _parse_csv(content: bytes) -> tuple[list[dict], list[str]]:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.1.0"}
+    return {"status": "ok", "version": "1.2.0"}
 
 
 # ── Activities ────────────────────────────────────────────────────────────────
@@ -225,6 +222,11 @@ async def import_summary(file: UploadFile = File(...)):
 
 @app.post("/import/gps")
 async def import_gps(file: UploadFile = File(...)):
+    """
+    GPS-Punkte-Import. **Idempotent**: Existierende GPS-Punkte einer
+    Activity werden vor dem Insert gelöscht. Das ermöglicht problemloses
+    Re-Importieren derselben Tour ohne Duplikate.
+    """
     t0 = time.monotonic()
     content = await file.read()
 
@@ -239,9 +241,10 @@ async def import_gps(file: UploadFile = File(...)):
             detail=f"Pflichtfelder fehlen: {', '.join(sorted(missing))}"
         )
 
-    batch: list[tuple] = []
+    # ── Pass 1: alle gültigen Punkte sammeln + Activity-IDs erfassen ──────────
+    all_points: list[tuple] = []
+    activity_ids: set[str] = set()
     skipped = 0
-    BATCH_SIZE = 5000
 
     for r in rows:
         aid = (r.get("activity_id") or "").strip()
@@ -252,28 +255,51 @@ async def import_gps(file: UploadFile = File(...)):
         if not coords:
             skipped += 1; continue
 
-        batch.append((aid, coords[0], coords[1]))
+        all_points.append((aid, coords[0], coords[1]))
+        activity_ids.add(aid)
 
-        if len(batch) >= BATCH_SIZE:
-            db.executemany(
-                "INSERT INTO gps_points (activity_id, lat, lng) VALUES (?, ?, ?)",
-                batch
+    # ── Pass 2: alte GPS-Punkte für betroffene Activities löschen ────────────
+    # Verhindert Duplikate bei Re-Import. SQLite-Limit für Variablen ist 999,
+    # daher in Chunks löschen.
+    deleted_count = 0
+    if activity_ids:
+        ids_list = list(activity_ids)
+        DELETE_CHUNK = 500   # safe well below SQLite's 999 limit
+        for i in range(0, len(ids_list), DELETE_CHUNK):
+            chunk = ids_list[i:i+DELETE_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            existing = db.query(
+                f"SELECT COUNT(*) as n FROM gps_points "
+                f"WHERE activity_id IN ({placeholders})",
+                tuple(chunk)
+            )[0]["n"]
+            deleted_count += existing
+            db.execute(
+                f"DELETE FROM gps_points WHERE activity_id IN ({placeholders})",
+                tuple(chunk)
             )
-            batch.clear()
 
-    if batch:
+    # ── Pass 3: neue GPS-Punkte in Batches einfügen ──────────────────────────
+    BATCH_SIZE = 5000
+    for i in range(0, len(all_points), BATCH_SIZE):
+        batch = all_points[i:i+BATCH_SIZE]
         db.executemany(
             "INSERT INTO gps_points (activity_id, lat, lng) VALUES (?, ?, ?)",
             batch
         )
 
     elapsed = round(time.monotonic() - t0, 2)
-    total   = len(rows) - skipped
-    log.info(f"Import GPS: {total} points, {skipped} skipped ({elapsed}s)")
+    total   = len(all_points)
+    log.info(
+        f"Import GPS: {total} points imported for {len(activity_ids)} activities, "
+        f"{deleted_count} replaced, {skipped} skipped ({elapsed}s)"
+    )
 
     return {
         "imported":  total,
         "skipped":   skipped,
+        "replaced":  deleted_count,
+        "activities_touched": len(activity_ids),
         "elapsed_s": elapsed,
     }
 

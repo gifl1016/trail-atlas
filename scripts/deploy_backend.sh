@@ -66,7 +66,7 @@ sudo -u trail-atlas sqlite3 "$DB_FILE" ".backup '$DB_BACKUP'" 2>/dev/null || {
     sudo cp "$DB_FILE" "$DB_BACKUP"
     sudo chown trail-atlas:trail-atlas "$DB_BACKUP"
 }
-DB_SIZE=$(du -sh "$DB_BACKUP" 2>/dev/null | cut -f1)
+DB_SIZE=$(sudo du -sh "$DB_BACKUP" 2>/dev/null | cut -f1 || echo "?")
 green "  ✓  $DB_BACKUP  ($DB_SIZE)"
 
 # Alte Backups löschen (behalte letzte 10)

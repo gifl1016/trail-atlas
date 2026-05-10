@@ -77,6 +77,21 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_activities_type
                     ON activities (activity_type);
 
+                CREATE TABLE IF NOT EXISTS sync_log (
+                    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                    status               TEXT    NOT NULL,
+                    started_at           TEXT    NOT NULL,
+                    finished_at          TEXT,
+                    activities_imported  INTEGER DEFAULT 0,
+                    gps_points_imported  INTEGER DEFAULT 0,
+                    activities_skipped   INTEGER DEFAULT 0,
+                    error_message        TEXT,
+                    duration_s           REAL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_sync_log_started
+                    ON sync_log (started_at DESC);
+
                 COMMIT;
             """)
 

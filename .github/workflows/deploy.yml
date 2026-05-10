@@ -6,20 +6,77 @@ on:
       - main
     paths:
       - 'src/**'
+      - 'backend/**'
+      - 'garmin-sync/**'
       - 'scripts/**'
 
   workflow_dispatch:
+    inputs:
+      target:
+        description: 'Was deployen?'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - frontend
+          - backend
+          - garmin-sync
+          - all
 
 jobs:
-  deploy:
-    name: Deploy to VM
+  detect-changes:
+    name: Was hat sich geändert?
     runs-on: ubuntu-latest
-
+    outputs:
+      frontend:    ${{ steps.detect.outputs.frontend }}
+      backend:     ${{ steps.detect.outputs.backend }}
+      garmin_sync: ${{ steps.detect.outputs.garmin_sync }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # full git history needed to find last-changed file reliably
+          fetch-depth: 2
+
+      - name: Detect changed paths
+        id: detect
+        run: |
+          MODE="${{ github.event.inputs.target }}"
+          if [ "$MODE" = "all" ]; then
+            echo "frontend=true"    >> $GITHUB_OUTPUT
+            echo "backend=true"     >> $GITHUB_OUTPUT
+            echo "garmin_sync=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          if [ "$MODE" = "frontend" ];    then echo "frontend=true"    >> $GITHUB_OUTPUT; exit 0; fi
+          if [ "$MODE" = "backend" ];     then echo "backend=true"     >> $GITHUB_OUTPUT; exit 0; fi
+          if [ "$MODE" = "garmin-sync" ]; then echo "garmin_sync=true" >> $GITHUB_OUTPUT; exit 0; fi
+
+          # Auto: schauen was sich seit dem letzten commit geändert hat
+          CHANGED=$(git diff --name-only HEAD~1 HEAD)
+          echo "Changed files:"
+          echo "$CHANGED"
+          echo ""
+
+          if echo "$CHANGED" | grep -qE '^src/';         then echo "frontend=true"    >> $GITHUB_OUTPUT; fi
+          if echo "$CHANGED" | grep -qE '^backend/';     then echo "backend=true"     >> $GITHUB_OUTPUT; fi
+          if echo "$CHANGED" | grep -qE '^garmin-sync/'; then echo "garmin_sync=true" >> $GITHUB_OUTPUT; fi
+
+          # Scripts geändert → alles neu deployen (sicher)
+          if echo "$CHANGED" | grep -qE '^scripts/'; then
+            echo "frontend=true"    >> $GITHUB_OUTPUT
+            echo "backend=true"     >> $GITHUB_OUTPUT
+            echo "garmin_sync=true" >> $GITHUB_OUTPUT
+          fi
+
+  deploy-frontend:
+    name: Deploy Frontend
+    needs: detect-changes
+    if: needs.detect-changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup SSH
         run: |
@@ -28,67 +85,116 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Determine latest HTML (via git history)
+      - name: Find latest HTML
         id: latest
         run: |
-          # Find the .html file in src/ most recently touched in git history.
-          # 'ls -t' is unreliable in CI because checkout normalises mtimes.
           LATEST=$(git log --name-only --pretty=format: --diff-filter=AM -- 'src/*.html' \
-                  | grep -E '^src/.*\.html$' \
-                  | awk '!seen[$0]++' \
-                  | head -1)
+                  | grep -E '^src/.*\.html$' | awk '!seen[$0]++' | head -1)
           if [ -z "$LATEST" ]; then
-            echo "❌ No HTML file found in src/"
+            echo "::error::Keine HTML-Datei in src/ gefunden"
             exit 1
           fi
           echo "Latest HTML: $LATEST"
-          echo "latest_html=$LATEST" >> $GITHUB_OUTPUT
-          echo "latest_basename=$(basename "$LATEST")" >> $GITHUB_OUTPUT
+          echo "latest=$LATEST" >> $GITHUB_OUTPUT
 
-      - name: Copy files to VM
+      - name: Upload to VM
         run: |
-          # Clean old src files first so deploy.sh can't pick stale ones
-          ssh -i ~/.ssh/deploy_key \
-            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+          ssh -i ~/.ssh/deploy_key ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
             "rm -f ~/trail-atlas/src/*.html"
-
-          # Copy ONLY the latest HTML
-          scp -i ~/.ssh/deploy_key \
-            "${{ steps.latest.outputs.latest_html }}" \
+          scp -i ~/.ssh/deploy_key "${{ steps.latest.outputs.latest }}" \
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:~/trail-atlas/src/
-
-          scp -i ~/.ssh/deploy_key \
-            scripts/deploy.sh \
+          scp -i ~/.ssh/deploy_key scripts/deploy.sh \
             ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:~/trail-atlas/scripts/
 
-          ssh -i ~/.ssh/deploy_key \
-            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-            "chmod +x ~/trail-atlas/scripts/deploy.sh"
-
-      - name: Run deploy script on VM
+      - name: Deploy
         run: |
-          ssh -i ~/.ssh/deploy_key \
-            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
-            "bash ~/trail-atlas/scripts/deploy.sh"
+          ssh -i ~/.ssh/deploy_key ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "chmod +x ~/trail-atlas/scripts/deploy.sh && bash ~/trail-atlas/scripts/deploy.sh"
 
       - name: Health check
         run: |
           sleep 3
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" \
             -u "${{ secrets.BASIC_AUTH_USER }}:${{ secrets.BASIC_AUTH_PASS }}" \
             "https://${{ secrets.VM_HOST }}")
-          API_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+          echo "HTML status: $CODE"
+          [ "$CODE" = "200" ] || exit 1
+
+      - name: Cleanup
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
+
+  deploy-backend:
+    name: Deploy Backend (with rollback)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Upload backend files
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "mkdir -p ~/trail-atlas/backend ~/trail-atlas/scripts"
+          scp -i ~/.ssh/deploy_key backend/* \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:~/trail-atlas/backend/
+          scp -i ~/.ssh/deploy_key scripts/deploy_backend.sh \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:~/trail-atlas/scripts/
+
+      - name: Deploy with auto-rollback
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "chmod +x ~/trail-atlas/scripts/deploy_backend.sh && bash ~/trail-atlas/scripts/deploy_backend.sh"
+
+      - name: API health check
+        run: |
+          sleep 3
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" \
             -u "${{ secrets.BASIC_AUTH_USER }}:${{ secrets.BASIC_AUTH_PASS }}" \
             "https://${{ secrets.VM_HOST }}/api/health")
-          echo "Deployed:    ${{ steps.latest.outputs.latest_basename }}"
-          echo "HTML status: $HTTP_CODE"
-          echo "API  status: $API_CODE"
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "❌ Health check failed: HTML HTTP $HTTP_CODE"
-            exit 1
-          fi
-          echo "✅ Health check passed"
+          echo "API status: $CODE"
+          [ "$CODE" = "200" ] || exit 1
 
-      - name: Cleanup SSH key
+      - name: Cleanup
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
+
+  deploy-garmin-sync:
+    name: Deploy Garmin Sync Script
+    needs: detect-changes
+    if: needs.detect-changes.outputs.garmin_sync == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Upload sync script
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "mkdir -p ~/trail-atlas/garmin-sync ~/trail-atlas/scripts"
+          scp -i ~/.ssh/deploy_key garmin-sync/* \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:~/trail-atlas/garmin-sync/
+          scp -i ~/.ssh/deploy_key scripts/deploy_garmin_sync.sh \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:~/trail-atlas/scripts/
+
+      - name: Deploy
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "chmod +x ~/trail-atlas/scripts/deploy_garmin_sync.sh && bash ~/trail-atlas/scripts/deploy_garmin_sync.sh"
+
+      - name: Cleanup
         if: always()
         run: rm -f ~/.ssh/deploy_key

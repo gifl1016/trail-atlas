@@ -17,8 +17,10 @@ Endpoints:
     GET    /db/stats                   → DB-Statistiken
 """
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import Optional
 from contextlib import asynccontextmanager
 import csv
 import io
@@ -49,7 +51,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Trail Atlas API",
-    version="1.2.0",
+    version="1.3.0",
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url=None,
@@ -90,7 +92,7 @@ def _parse_csv(content: bytes) -> tuple[list[dict], list[str]]:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.2.0"}
+    return {"status": "ok", "version": "1.3.0"}
 
 
 # ── Activities ────────────────────────────────────────────────────────────────
@@ -342,3 +344,62 @@ def db_delete_gps():
     db.execute("DELETE FROM gps_points")
     log.info(f"GPS points deleted: {count}")
     return {"status": "ok", "gps_points_deleted": count}
+
+
+# ── Sync Log ──────────────────────────────────────────────────────────────────
+
+class SyncLogEntry(BaseModel):
+    """Eintrag der vom garmin_sync.py Script geschrieben wird."""
+    status:               str            = Field(..., description="ok | error")
+    started_at:           str            = Field(..., description="ISO 8601 timestamp")
+    finished_at:          Optional[str]  = None
+    activities_imported:  int            = 0
+    gps_points_imported:  int            = 0
+    activities_skipped:   int            = 0
+    error_message:        Optional[str]  = None
+    duration_s:           Optional[float] = None
+
+
+@app.get("/sync/status")
+def get_sync_status(limit: int = 10):
+    """
+    Letzte N Sync-Läufe zurückgeben (default 10).
+    Wird vom Frontend angezeigt damit der User sieht ob der Cronjob durchläuft.
+    """
+    rows = db.query(
+        "SELECT * FROM sync_log ORDER BY id DESC LIMIT ?",
+        (limit,)
+    )
+    entries = [dict(r) for r in rows]
+    last_ok = next((e for e in entries if e["status"] == "ok"), None)
+    last_err = next((e for e in entries if e["status"] == "error"), None)
+    return {
+        "last_ok":    last_ok,
+        "last_error": last_err,
+        "recent":     entries,
+    }
+
+
+@app.post("/sync/log")
+def post_sync_log(entry: SyncLogEntry):
+    """
+    Endpoint den das garmin_sync.py Script aufruft um einen Sync-Lauf zu protokollieren.
+    """
+    db.execute(
+        """INSERT INTO sync_log
+           (status, started_at, finished_at, activities_imported,
+            gps_points_imported, activities_skipped, error_message, duration_s)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            entry.status,
+            entry.started_at,
+            entry.finished_at,
+            entry.activities_imported,
+            entry.gps_points_imported,
+            entry.activities_skipped,
+            entry.error_message,
+            entry.duration_s,
+        )
+    )
+    log.info(f"Sync log: {entry.status} ({entry.activities_imported} acts, {entry.gps_points_imported} pts)")
+    return {"status": "logged"}

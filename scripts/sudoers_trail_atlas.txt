@@ -1,40 +1,31 @@
+  GNU nano 6.2                /etc/sudoers.d/trail-atlas.tmp
 # =============================================================================
 # Trail Atlas – Sudoers Konfiguration
 # =============================================================================
 # Einrichten:
 #   sudo visudo -f /etc/sudoers.d/trail-atlas
-#   → Inhalt einfügen, DEIN_USER ersetzen
+#   → Inhalt einfügen, ubuntu ersetzen
 # =============================================================================
-
 # Frontend Deploy
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/sbin/nginx -t
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl reload nginx
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/chown -R www-data\:www-data /var/www/trail-atlas
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/chown -R DEIN_USER /var/www/trail-atlas
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/chmod 644 /var/www/trail-atlas/index.html
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/chmod -R 644 /var/www/trail-atlas/libs
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/chmod 755 /var/www/trail-atlas
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/chmod 755 /var/www/trail-atlas/libs
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /var/www/trail-atlas/libs
-
+ubuntu ALL=(ALL) NOPASSWD: /usr/sbin/nginx -t
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/systemctl reload nginx
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/chown -R www-data\:www-data /var/www/trail-atlas
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/chown -R ubuntu /var/www/trail-atlas
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/chmod 644 /var/www/trail-atlas/index.html
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/chmod -R 644 /var/www/trail-atlas/libs
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/chmod 755 /var/www/trail-atlas
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/chmod 755 /var/www/trail-atlas/libs
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /var/www/trail-atlas/libs
 # Backend Deploy
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart trail-atlas
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl status trail-atlas
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/cp /home/DEIN_USER/trail-atlas/backend/* /opt/trail-atlas/backend/
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/cp /var/lib/trail-atlas/backups/code_*/*.py /opt/trail-atlas/backend/
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/chown -R trail-atlas\:trail-atlas /opt/trail-atlas/backend
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/chmod 644 /opt/trail-atlas/backend/*
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /var/lib/trail-atlas/backups
-DEIN_USER ALL=(ALL) NOPASSWD: /opt/trail-atlas/venv/bin/pip install *
-
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart trail-atlas
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/systemctl status trail-atlas
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/cp /home/ubuntu/trail-atlas/backend/* /opt/trail>
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/cp /var/lib/trail-atlas/backups/code_*/*.py /opt>
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/chown -R trail-atlas\:trail-atlas /opt/trail-atl>
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/chmod 644 /opt/trail-atlas/backend/*
+ubuntu ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /var/lib/trail-atlas/backups
+ubuntu ALL=(ALL) NOPASSWD: /opt/trail-atlas/venv/bin/pip install *
 # Garmin Sync Deploy
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/cp /home/DEIN_USER/trail-atlas/garmin-sync/* /opt/trail-atlas/garmin-sync/
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/chown -R trail-atlas\:trail-atlas /opt/trail-atlas/garmin-sync
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/chmod 750 /opt/trail-atlas/garmin-sync/garmin_sync.py
-DEIN_USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /opt/trail-atlas/garmin-sync
-
-# Run as trail-atlas user (für deploy_backend.sh DB-Backup + sync tests)
-DEIN_USER ALL=(trail-atlas) NOPASSWD: /usr/bin/sqlite3 *
-DEIN_USER ALL=(trail-atlas) NOPASSWD: /usr/bin/mkdir *
-DEIN_USER ALL=(trail-atlas) NOPASSWD: /opt/trail-atlas/venv/bin/python3 *
-DEIN_USER ALL=(trail-atlas) NOPASSWD: /usr/bin/bash -c *
+                                  [ Read 45 lines ]
+^G Help       ^O Write Out  ^W Where Is   ^K Cut        ^T Execute    ^C Location
+^X Exit       ^R Read File  ^\ Replace    ^U Paste      ^J Justify    ^/ Go To Line

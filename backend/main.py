@@ -1,5 +1,5 @@
 """
-Trail Atlas – FastAPI Backend
+Trail Atlas – FastAPI Backend 
 =============================
 REST API für Aktivitätsdaten und GPS-Punkte.
 Datenbank: SQLite (WAL-Modus, persistente Connection)

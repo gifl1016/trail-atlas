@@ -9,6 +9,7 @@ Endpoints:
     GET    /activities                 → Alle Aktivitäten
     GET    /activities/{id}            → Eine Aktivität
     GET    /activities/{id}/gps        → GPS-Punkte einer Aktivität
+    GET    /activities/gps/all         → Alle GPS-Punkte aller Aktivitäten (Bulk)
     DELETE /activities/{id}            → Aktivität + GPS löschen
     POST   /import/summary             → CSV Metadaten importieren
     POST   /import/gps                 → CSV GPS-Punkte importieren
@@ -51,7 +52,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Trail Atlas API",
-    version="1.3.0",
+    version="1.4.0",
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url=None,
@@ -92,7 +93,7 @@ def _parse_csv(content: bytes) -> tuple[list[dict], list[str]]:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.3.0"}
+    return {"status": "ok", "version": "1.4.0"}
 
 
 # ── Activities ────────────────────────────────────────────────────────────────
@@ -104,6 +105,29 @@ def get_activities():
         "start_lat, start_lng FROM activities ORDER BY start_date DESC"
     )
     return [dict(r) for r in rows]
+
+
+@app.get("/activities/gps/all")
+def get_all_gps():
+    """
+    Alle GPS-Punkte aller Aktivitäten in einem einzigen Response.
+    Ersetzt N einzelne /activities/{id}/gps Calls beim App-Start.
+
+    Response-Format: {"points": {"activity_id_1": [[lat,lng],...], ...}}
+
+    Performance: Eine einzige SQLite-Abfrage statt N separate Queries.
+    Bei 100 Touren mit je 500 Punkten: ~200-400KB JSON, <100ms Abfrage.
+    """
+    rows = db.query(
+        "SELECT activity_id, lat, lng FROM gps_points ORDER BY activity_id, id"
+    )
+    result: dict[str, list] = {}
+    for r in rows:
+        aid = r["activity_id"]
+        if aid not in result:
+            result[aid] = []
+        result[aid].append([r["lat"], r["lng"]])
+    return {"points": result}
 
 
 @app.get("/activities/{activity_id}")

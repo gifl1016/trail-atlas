@@ -6,6 +6,10 @@ SQLite mit persistenter Single-Connection und WAL-Modus.
 Wichtig: Wir nutzen EINE persistente Connection für alle Operationen, damit
 Writes für nachfolgende Reads sofort sichtbar sind. Mit FastAPI Single-Worker
 (siehe systemd Service) ist das konsistent und thread-safe via Lock.
+
+Schema-Version: 2  (Multi-User-Fundament)
+  v1 → v2: users, garmin_credentials, invite_codes hinzugefügt.
+            activities.user_id (nullable für Rückwärtskompatibilität).
 """
 
 import sqlite3
@@ -42,11 +46,12 @@ class Database:
         return conn
 
     def init(self):
-        """DB-Tabellen erstellen, persistente Connection öffnen."""
+        """DB-Tabellen erstellen und ggf. migrieren, persistente Connection öffnen."""
         log.info(f"Database: {self.path}")
         self._conn = self._open()
 
         with self._lock:
+            # ── v1-Tabellen (unverändert) ─────────────────────────────────────
             self._conn.executescript("""
                 BEGIN;
 
@@ -95,7 +100,89 @@ class Database:
                 COMMIT;
             """)
 
-        log.info("Database initialized")
+            # ── v2: Multi-User-Tabellen ───────────────────────────────────────
+            # CREATE TABLE IF NOT EXISTS ist sicher idempotent –
+            # auf frischer DB sofort angelegt, auf bestehender v1-DB
+            # beim ersten Neustart nachgezogen.
+            self._conn.executescript("""
+                BEGIN;
+
+                -- Nutzer-Tabelle
+                -- password_hash: bcrypt-Hash (60 Zeichen)
+                CREATE TABLE IF NOT EXISTS users (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username      TEXT    NOT NULL UNIQUE,
+                    password_hash TEXT    NOT NULL,
+                    is_admin      INTEGER NOT NULL DEFAULT 0,
+                    created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_users_username
+                    ON users (username);
+
+                -- Garmin-Zugangsdaten pro Nutzer
+                -- token_json: verschlüsselter JSON-Blob (Fernet, Schlüssel aus garmin.env)
+                -- Wird in Schritt 6 (Garmin-Sync pro User) befüllt.
+                CREATE TABLE IF NOT EXISTS garmin_credentials (
+                    user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    token_json  TEXT    NOT NULL,
+                    updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+
+                -- Einmal-Einladungscodes für Registrierung
+                -- code:       zufälliger URL-safe Token (32 Zeichen)
+                -- used_at:    NULL = noch nicht eingelöst
+                -- expires_at: ISO-8601, nach diesem Datum abgelaufen
+                CREATE TABLE IF NOT EXISTS invite_codes (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code        TEXT    NOT NULL UNIQUE,
+                    created_by  INTEGER REFERENCES users(id),
+                    created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    expires_at  TEXT    NOT NULL,
+                    used_at     TEXT,
+                    used_by     INTEGER REFERENCES users(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_invite_code
+                    ON invite_codes (code);
+
+                COMMIT;
+            """)
+
+        # ── Migration: activities.user_id nachträglich hinzufügen ─────────────
+        self._migrate_activities_user_id()
+
+        log.info("Database initialized (schema v2)")
+
+    def _migrate_activities_user_id(self):
+        """
+        Fügt activities.user_id hinzu falls noch nicht vorhanden.
+
+        Warum hier und nicht im executescript oben?
+        SQLite unterstützt kein 'ALTER TABLE ADD COLUMN IF NOT EXISTS'.
+        Wir lesen die vorhandenen Spalten aus und entscheiden dann.
+
+        Bestehende Aktivitäten bekommen user_id = NULL.
+        Das ist gewollt: in Schritt 2 (Auth-Layer) wird der erste
+        angelegte User als Eigentümer aller NULL-Aktivitäten gesetzt.
+        """
+        cols = [
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(activities)")
+        ]
+        if "user_id" not in cols:
+            with self._lock:
+                self._conn.execute(
+                    "ALTER TABLE activities ADD COLUMN user_id INTEGER "
+                    "REFERENCES users(id)"
+                )
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_activities_user "
+                    "ON activities (user_id)"
+                )
+            log.info("Migration: activities.user_id + index added (existing rows → NULL)")
+        else:
+            log.debug("Migration: activities.user_id already present, skipping")
 
     def close(self):
         if self._conn is not None:

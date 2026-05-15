@@ -5,7 +5,12 @@ REST API für Aktivitätsdaten und GPS-Punkte.
 Datenbank: SQLite (WAL-Modus, persistente Connection)
 
 Endpoints:
-    GET    /health                     → Health-Check
+    GET    /health                     → Health-Check (öffentlich)
+    POST   /auth/login                 → Login → Session-Cookie
+    POST   /auth/logout                → Logout → Cookie löschen
+    GET    /auth/me                    → Aktueller User
+    POST   /auth/signup                → Registrierung mit Invite-Code
+    POST   /auth/invite                → Invite-Code generieren (Admin)
     GET    /activities                 → Alle Aktivitäten
     GET    /activities/{id}            → Eine Aktivität
     GET    /activities/{id}/gps        → GPS-Punkte einer Aktivität
@@ -18,7 +23,7 @@ Endpoints:
     GET    /db/stats                   → DB-Statistiken
 """
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Body
+from fastapi import FastAPI, UploadFile, File, HTTPException, Body, Request, Response, Depends, Cookie
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -30,6 +35,12 @@ import time
 import logging
 
 from database import Database
+from auth import (
+    create_session_token, verify_session_token, authenticate_user,
+    get_user_by_id, create_user, ensure_admin_exists,
+    create_invite_code, validate_invite_code, redeem_invite_code,
+    SESSION_MAX_AGE,
+)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -46,13 +57,14 @@ db = Database()
 async def lifespan(app: FastAPI):
     log.info("Trail Atlas Backend starting…")
     db.init()
+    ensure_admin_exists(db)
     yield
     log.info("Trail Atlas Backend stopping…")
     db.close()
 
 app = FastAPI(
     title="Trail Atlas API",
-    version="1.4.0",
+    version="1.5.0",
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url=None,
@@ -89,17 +101,152 @@ def _parse_csv(content: bytes) -> tuple[list[dict], list[str]]:
     headers = reader.fieldnames or []
     return rows, list(headers)
 
+# ── Auth Dependency ───────────────────────────────────────────────────────────
+# Jeder geschützte Endpoint bekommt den aktuellen User injected.
+# Solange noch kein User in der DB ist, wird Auth übersprungen (Übergangsphase).
+
+COOKIE_NAME = "trail_atlas_session"
+
+
+async def get_current_user(request: Request) -> dict | None:
+    """
+    FastAPI Dependency: prüft Session-Cookie und gibt User-Dict zurück.
+
+    Übergangslogik: Wenn noch keine Users in der DB existieren (frische
+    Installation, Schritt 1 deployed aber noch kein Admin angelegt),
+    werden alle Requests durchgelassen. Sobald mindestens ein User
+    existiert, ist ein gültiger Session-Cookie Pflicht.
+    """
+    user_count = db.query("SELECT COUNT(*) as n FROM users")[0]["n"]
+    if user_count == 0:
+        # Keine Users → Auth noch nicht aktiv, alles durchlassen
+        return None
+
+    token = request.cookies.get(COOKIE_NAME)
+    if not token:
+        raise HTTPException(status_code=401, detail="Nicht eingeloggt")
+
+    payload = verify_session_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Session abgelaufen")
+
+    user = get_user_by_id(db, payload["uid"])
+    if not user:
+        raise HTTPException(status_code=401, detail="User nicht gefunden")
+
+    return user
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.4.0"}
+    return {"status": "ok", "version": "1.5.0"}
+
+
+# ── Auth Endpoints ────────────────────────────────────────────────────────────
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class SignupRequest(BaseModel):
+    username: str
+    password: str
+    invite_code: str
+
+
+@app.post("/auth/login")
+def login(body: LoginRequest, response: Response):
+    """Login → Session-Cookie setzen."""
+    user = authenticate_user(db, body.username, body.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Ungültige Zugangsdaten")
+
+    token = create_session_token(user["id"], user["username"])
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        secure=True,      # nur über HTTPS
+        samesite="strict",
+        path="/",
+    )
+    log.info(f"Login: {user['username']}")
+    return {"status": "ok", "username": user["username"], "is_admin": user["is_admin"]}
+
+
+@app.post("/auth/logout")
+def logout(response: Response):
+    """Session-Cookie löschen."""
+    response.delete_cookie(key=COOKIE_NAME, path="/")
+    return {"status": "ok"}
+
+
+@app.get("/auth/me")
+def auth_me(user: dict | None = Depends(get_current_user)):
+    """Aktuellen eingeloggten User zurückgeben (oder 401)."""
+    if user is None:
+        # Kein User in DB → Auth nicht aktiv
+        return {"status": "ok", "auth_active": False, "user": None}
+    return {"status": "ok", "auth_active": True, "user": {
+        "id": user["id"], "username": user["username"], "is_admin": user["is_admin"]
+    }}
+
+
+@app.post("/auth/signup")
+def signup(body: SignupRequest, response: Response):
+    """Registrierung mit Invite-Code."""
+    # Invite validieren
+    if not validate_invite_code(db, body.invite_code):
+        raise HTTPException(status_code=400, detail="Ungültiger oder abgelaufener Einladungscode")
+
+    # Username-Validierung
+    username = body.username.strip()
+    if len(username) < 3 or len(username) > 30:
+        raise HTTPException(status_code=400, detail="Username muss 3-30 Zeichen lang sein")
+    if not username.isalnum() and "_" not in username:
+        raise HTTPException(status_code=400, detail="Username: nur Buchstaben, Zahlen, Unterstriche")
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="Passwort muss mindestens 8 Zeichen lang sein")
+
+    # User anlegen
+    try:
+        user_id = create_user(db, username, body.password, is_admin=False)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    # Invite einlösen
+    redeem_invite_code(db, body.invite_code, user_id)
+
+    # Direkt einloggen
+    token = create_session_token(user_id, username)
+    response.set_cookie(
+        key=COOKIE_NAME, value=token, max_age=SESSION_MAX_AGE,
+        httponly=True, secure=True, samesite="strict", path="/",
+    )
+    log.info(f"Signup: {username} (invite redeemed)")
+    return {"status": "ok", "username": username}
+
+
+@app.post("/auth/invite")
+def generate_invite(user: dict | None = Depends(get_current_user)):
+    """Neuen Invite-Code generieren (nur Admin)."""
+    if user is None:
+        raise HTTPException(status_code=401, detail="Auth nicht aktiv")
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Nur Admins können Einladungen erstellen")
+
+    code = create_invite_code(db, created_by=user["id"])
+    return {"status": "ok", "invite_code": code}
 
 
 # ── Activities ────────────────────────────────────────────────────────────────
 
 @app.get("/activities")
-def get_activities():
+def get_activities(user: dict | None = Depends(get_current_user)):
     rows = db.query(
         "SELECT activity_id, activity_type, start_date, end_date, "
         "start_lat, start_lng FROM activities ORDER BY start_date DESC"
@@ -108,7 +255,7 @@ def get_activities():
 
 
 @app.get("/activities/gps/all")
-def get_all_gps():
+def get_all_gps(user: dict | None = Depends(get_current_user)):
     """
     Alle GPS-Punkte aller Aktivitäten in einem einzigen Response.
     Ersetzt N einzelne /activities/{id}/gps Calls beim App-Start.
@@ -131,7 +278,7 @@ def get_all_gps():
 
 
 @app.get("/activities/{activity_id}")
-def get_activity(activity_id: str):
+def get_activity(activity_id: str, user: dict | None = Depends(get_current_user)):
     rows = db.query(
         "SELECT * FROM activities WHERE activity_id = ?", (activity_id,)
     )
@@ -141,7 +288,7 @@ def get_activity(activity_id: str):
 
 
 @app.get("/activities/{activity_id}/gps")
-def get_gps(activity_id: str):
+def get_gps(activity_id: str, user: dict | None = Depends(get_current_user)):
     rows = db.query(
         "SELECT lat, lng FROM gps_points WHERE activity_id = ? ORDER BY id",
         (activity_id,)
@@ -150,7 +297,7 @@ def get_gps(activity_id: str):
 
 
 @app.delete("/activities/{activity_id}")
-def delete_activity(activity_id: str):
+def delete_activity(activity_id: str, user: dict | None = Depends(get_current_user)):
     existing = db.query(
         "SELECT activity_id FROM activities WHERE activity_id = ?", (activity_id,)
     )
@@ -171,7 +318,7 @@ def delete_activity(activity_id: str):
 # ── Import ────────────────────────────────────────────────────────────────────
 
 @app.post("/import/summary")
-async def import_summary(file: UploadFile = File(...)):
+async def import_summary(file: UploadFile = File(...), user: dict | None = Depends(get_current_user)):
     t0 = time.monotonic()
     content = await file.read()
 
@@ -247,7 +394,7 @@ async def import_summary(file: UploadFile = File(...)):
 
 
 @app.post("/import/gps")
-async def import_gps(file: UploadFile = File(...)):
+async def import_gps(file: UploadFile = File(...), user: dict | None = Depends(get_current_user)):
     """
     GPS-Punkte-Import. **Idempotent**: Existierende GPS-Punkte einer
     Activity werden vor dem Insert gelöscht. Das ermöglicht problemloses
@@ -333,7 +480,7 @@ async def import_gps(file: UploadFile = File(...)):
 # ── DB Management ─────────────────────────────────────────────────────────────
 
 @app.get("/db/stats")
-def db_stats():
+def db_stats(user: dict | None = Depends(get_current_user)):
     act_count = db.query("SELECT COUNT(*) as n FROM activities")[0]["n"]
     gps_count = db.query("SELECT COUNT(*) as n FROM gps_points")[0]["n"]
     no_gps    = db.query(
@@ -352,7 +499,7 @@ def db_stats():
 
 
 @app.delete("/db/reset")
-def db_reset():
+def db_reset(user: dict | None = Depends(get_current_user)):
     # VACUUM darf nicht in einer Transaktion stehen
     db.execute("DELETE FROM gps_points")
     db.execute("DELETE FROM activities")
@@ -363,7 +510,7 @@ def db_reset():
 
 
 @app.delete("/db/gps")
-def db_delete_gps():
+def db_delete_gps(user: dict | None = Depends(get_current_user)):
     count = db.query("SELECT COUNT(*) as n FROM gps_points")[0]["n"]
     db.execute("DELETE FROM gps_points")
     log.info(f"GPS points deleted: {count}")
@@ -385,7 +532,7 @@ class SyncLogEntry(BaseModel):
 
 
 @app.get("/sync/status")
-def get_sync_status(limit: int = 10):
+def get_sync_status(limit: int = 10, user: dict | None = Depends(get_current_user)):
     """
     Letzte N Sync-Läufe zurückgeben (default 10).
     Wird vom Frontend angezeigt damit der User sieht ob der Cronjob durchläuft.

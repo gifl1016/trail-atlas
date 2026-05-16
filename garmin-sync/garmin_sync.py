@@ -152,36 +152,41 @@ def login_garmin(env) -> Garmin:
 class TrailAtlasAPI:
     def __init__(self, env):
         self.base = env["API_BASE"].rstrip("/")
-        self.auth = (env["API_USER"], env["API_PASS"])
         self.session = requests.Session()
+        # Auth: SYNC_API_KEY Header (ersetzt Basic Auth seit v1.6.0)
+        sync_key = env.get("SYNC_API_KEY", "")
+        if sync_key:
+            self.session.headers["X-Sync-Key"] = sync_key
+        else:
+            log.warning("SYNC_API_KEY nicht in garmin.env – API-Calls könnten fehlschlagen")
 
     def _url(self, path):
         return f"{self.base}{path}"
 
     def get_existing_ids(self) -> set[str]:
         """Liste aller bereits in der DB vorhandenen activity_ids."""
-        r = self.session.get(self._url("/activities"), auth=self.auth, timeout=30)
+        r = self.session.get(self._url("/activities"), timeout=30)
         r.raise_for_status()
         return {a["activity_id"] for a in r.json()}
 
     def import_summary_csv(self, csv_text: str) -> dict:
         files = {"file": ("summary.csv", csv_text.encode("utf-8"), "text/csv")}
         r = self.session.post(self._url("/import/summary"),
-                              auth=self.auth, files=files, timeout=120)
+                              files=files, timeout=120)
         r.raise_for_status()
         return r.json()
 
     def import_gps_csv(self, csv_text: str) -> dict:
         files = {"file": ("gps.csv", csv_text.encode("utf-8"), "text/csv")}
         r = self.session.post(self._url("/import/gps"),
-                              auth=self.auth, files=files, timeout=300)
+                              files=files, timeout=300)
         r.raise_for_status()
         return r.json()
 
     def post_sync_log(self, entry: dict):
         try:
             r = self.session.post(self._url("/sync/log"),
-                                  auth=self.auth, json=entry, timeout=15)
+                                  json=entry, timeout=15)
             r.raise_for_status()
         except Exception as e:
             log.warning(f"Sync-Log konnte nicht gepostet werden: {e}")

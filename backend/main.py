@@ -31,6 +31,7 @@ from contextlib import asynccontextmanager
 import csv
 import io
 import math
+import os
 import time
 import logging
 
@@ -64,7 +65,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Trail Atlas API",
-    version="1.5.0",
+    version="1.6.0",
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url=None,
@@ -104,24 +105,32 @@ def _parse_csv(content: bytes) -> tuple[list[dict], list[str]]:
 # ── Auth Dependency ───────────────────────────────────────────────────────────
 # Jeder geschützte Endpoint bekommt den aktuellen User injected.
 # Solange noch kein User in der DB ist, wird Auth übersprungen (Übergangsphase).
+# Der Garmin-Sync-Cronjob authentifiziert sich via SYNC_API_KEY Header.
 
 COOKIE_NAME = "trail_atlas_session"
+SYNC_API_KEY = os.getenv("SYNC_API_KEY", "")
 
 
 async def get_current_user(request: Request) -> dict | None:
     """
-    FastAPI Dependency: prüft Session-Cookie und gibt User-Dict zurück.
+    FastAPI Dependency: prüft Session-Cookie ODER Sync-API-Key.
 
-    Übergangslogik: Wenn noch keine Users in der DB existieren (frische
-    Installation, Schritt 1 deployed aber noch kein Admin angelegt),
-    werden alle Requests durchgelassen. Sobald mindestens ein User
-    existiert, ist ein gültiger Session-Cookie Pflicht.
+    Reihenfolge:
+    1. SYNC_API_KEY im Header "X-Sync-Key" → Cronjob-Zugriff (kein User-Kontext)
+    2. Keine Users in DB → Auth nicht aktiv, alles durchlassen
+    3. Session-Cookie → normaler User-Login
     """
+    # 1) Sync-API-Key: für den lokalen Cronjob (garmin_sync.py)
+    sync_key = request.headers.get("X-Sync-Key", "")
+    if SYNC_API_KEY and sync_key == SYNC_API_KEY:
+        return None  # Autorisiert, aber kein User-Kontext
+
+    # 2) Keine Users → Auth noch nicht aktiv
     user_count = db.query("SELECT COUNT(*) as n FROM users")[0]["n"]
     if user_count == 0:
-        # Keine Users → Auth noch nicht aktiv, alles durchlassen
         return None
 
+    # 3) Session-Cookie prüfen
     token = request.cookies.get(COOKIE_NAME)
     if not token:
         raise HTTPException(status_code=401, detail="Nicht eingeloggt")
@@ -141,7 +150,7 @@ async def get_current_user(request: Request) -> dict | None:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.5.0"}
+    return {"status": "ok", "version": "1.6.0"}
 
 
 # ── Auth Endpoints ────────────────────────────────────────────────────────────

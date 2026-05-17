@@ -95,6 +95,54 @@ sudo -u trail-atlas sqlite3 /var/lib/trail-atlas/trail_atlas.db \
   "CREATE TABLE IF NOT EXISTS sync_log (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, activities_imported INTEGER DEFAULT 0, gps_points_imported INTEGER DEFAULT 0, activities_skipped INTEGER DEFAULT 0, error_message TEXT, duration_s REAL);"
 ```
 
+### API gibt 401 bei curl-Befehlen
+
+**Symptom:** `curl http://127.0.0.1:8000/activities` → `{"detail":"Nicht eingeloggt"}`.
+**Ursache:** Seit v1.5.0 brauchen alle Endpoints Authentifizierung (Session-Cookie oder Sync-API-Key).
+**Fix:** Sync-API-Key als Header mitgeben:
+```bash
+curl -H "X-Sync-Key: DEIN_KEY" http://127.0.0.1:8000/activities
+```
+Oder den Key automatisch aus der env-Datei lesen:
+```bash
+curl -H "X-Sync-Key: $(sudo grep SYNC_API_KEY /etc/trail-atlas/garmin.env | cut -d= -f2)" \
+  http://127.0.0.1:8000/activities
+```
+
+---
+
+## Auth + Session
+
+### SECRET_KEY / ADMIN_USER nicht gesetzt (Warning im Log)
+
+**Symptom:** Log zeigt `SECRET_KEY nicht gesetzt – generierter temporärer Key` oder `ADMIN_USER/ADMIN_PASS nicht gesetzt`.
+**Ursache:** Die Umgebungsvariablen aus `garmin.env` werden nicht vom systemd Service geladen.
+**Fix:** EnvironmentFile in systemd einrichten:
+```bash
+sudo systemctl edit trail-atlas
+```
+Einfügen:
+```ini
+[Service]
+EnvironmentFile=/etc/trail-atlas/garmin.env
+```
+Dann:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart trail-atlas
+```
+Prüfen ob es wirkt: `sudo systemctl show trail-atlas | grep EnvironmentFile`
+
+### Permission denied beim manuellen Sync-Test
+
+**Symptom:** `sudo -u trail-atlas python3 ~/trail-atlas/garmin-sync/garmin_sync.py` → `Permission denied`.
+**Ursache:** `~` expandiert zum Home des aufrufenden Users (`/home/ubuntu`), aber der `trail-atlas` Systemuser hat dort keine Leserechte.
+**Fix:** Den vollen Deploy-Pfad verwenden:
+```bash
+sudo -u trail-atlas /opt/trail-atlas/venv/bin/python3 \
+  /opt/trail-atlas/garmin-sync/garmin_sync.py --dry-run
+```
+
 ---
 
 ## Garmin Sync
@@ -124,6 +172,15 @@ sudo chmod 600 /etc/trail-atlas/garmin.env
 1. Token löschen: `sudo rm /var/lib/trail-atlas/garmin_token.json`
 2. Im Browser auf garmin.com einloggen (von derselben IP oder die VM-IP whitelisten)
 3. Erneut versuchen: `trail-atlas sync 1`
+
+### Sync gibt 401/403 nach Auth-Umstellung
+
+**Symptom:** Sync-Log zeigt `401 Unauthorized` oder `403 Forbidden`.
+**Ursache:** `garmin_sync.py` nutzt noch Basic Auth (`API_USER`/`API_PASS`) statt den neuen `SYNC_API_KEY`.
+**Fix:**
+1. Aktuelles `garmin_sync.py` deployen (nutzt `X-Sync-Key` Header)
+2. `SYNC_API_KEY` in `/etc/trail-atlas/garmin.env` setzen
+3. Test: `trail-atlas sync dry`
 
 ---
 
@@ -202,4 +259,7 @@ trail-atlas db stats
 sudo ls -la /opt/trail-atlas/backend/
 sudo ls -la /var/lib/trail-atlas/
 sudo ls -la /etc/trail-atlas/
+
+# EnvironmentFile geladen?
+sudo systemctl show trail-atlas | grep EnvironmentFile
 ```

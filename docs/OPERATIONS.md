@@ -94,9 +94,11 @@ trail-atlas db backup
 
 ```bash
 trail-atlas db stats
-# Oder:
+# Oder direkt über die API (benötigt Auth – Sync-Key oder Session-Cookie):
 curl -s http://127.0.0.1:8000/db/stats | python3 -m json.tool
 ```
+
+> **Hinweis:** Seit v1.5.0 benötigen API-Endpoints Authentifizierung. Direkte `curl`-Befehle gegen die API funktionieren nur wenn (a) noch kein User in der DB ist, oder (b) der `SYNC_API_KEY` als Header mitgegeben wird: `curl -H "X-Sync-Key: DEIN_KEY" http://127.0.0.1:8000/db/stats`. Der `trail-atlas` CLI-Helper läuft als Systemuser und nutzt den Key automatisch über die Umgebung.
 
 ### "Alle Daten löschen und neu syncen"
 
@@ -104,11 +106,24 @@ curl -s http://127.0.0.1:8000/db/stats | python3 -m json.tool
 # 1. Backup
 trail-atlas db backup
 
-# 2. Reset
-curl -X DELETE http://127.0.0.1:8000/db/reset
+# 2. Reset (als trail-atlas User oder mit Sync-Key)
+curl -H "X-Sync-Key: $(sudo grep SYNC_API_KEY /etc/trail-atlas/garmin.env | cut -d= -f2)" \
+  -X DELETE http://127.0.0.1:8000/db/reset
 
 # 3. Full Resync
 trail-atlas sync full
+```
+
+### "Neuen User einladen"
+
+```bash
+# 1. Im Browser: einloggen → Import-Tab → "Einladungscode generieren"
+# 2. Link kopieren und an den Freund schicken
+# 3. Freund öffnet den Link → Signup-Formular → fertig
+
+# Alternativ über die API:
+curl -H "X-Sync-Key: $(sudo grep SYNC_API_KEY /etc/trail-atlas/garmin.env | cut -d= -f2)" \
+  -X POST http://127.0.0.1:8000/auth/invite
 ```
 
 ---
@@ -122,6 +137,22 @@ trail-atlas sync full
 | DuckDNS IP-Update | Alle 5 Minuten | `crontab -l` |
 | Logrotate | Wöchentlich | `/etc/logrotate.d/trail-atlas` |
 | DB-Backup bei Backend-Deploy | Bei jedem Push | GitHub Actions |
+
+### Cronjob-Details
+
+Der Garmin-Sync-Cronjob ist in `/etc/cron.d/trail-atlas-garmin-sync` definiert:
+
+```
+0 3 * * * trail-atlas /opt/trail-atlas/venv/bin/python3 /opt/trail-atlas/garmin-sync/garmin_sync.py >> /var/log/trail-atlas/garmin_sync.log 2>&1
+```
+
+Läuft als User `trail-atlas`, nutzt die venv unter `/opt/trail-atlas/venv/`. Das Script liest die Konfiguration (inkl. `SYNC_API_KEY`) aus `/etc/trail-atlas/garmin.env` via eigener `load_env()`-Funktion.
+
+Manueller Test:
+```bash
+sudo -u trail-atlas /opt/trail-atlas/venv/bin/python3 \
+  /opt/trail-atlas/garmin-sync/garmin_sync.py --dry-run
+```
 
 ---
 

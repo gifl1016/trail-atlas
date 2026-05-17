@@ -15,7 +15,7 @@ Der Workflow erkennt automatisch welche Dateien sich geändert haben und startet
 | Geänderter Pfad | Triggered Job | Was passiert |
 |-----------------|---------------|-------------|
 | `src/*.html` | Frontend Deploy | HTML patchen (SRI-Hashes) → Nginx |
-| `backend/*.py` | Backend Deploy | Syntax-Check → DB-Backup → Code kopieren → Service-Restart → Health-Check → bei Fehler: Rollback |
+| `backend/*.py` | Backend Deploy | Syntax-Check → DB-Backup → Code kopieren → pip install → Service-Restart → Health-Check → bei Fehler: Rollback |
 | `garmin-sync/*` | Sync Deploy | Syntax-Check → Script kopieren → Dry-Run |
 | `scripts/*` | Alle drei | Alle Komponenten werden neu deployed |
 
@@ -46,11 +46,12 @@ Manueller Trigger: GitHub → Actions → "Deploy Trail Atlas" → Run workflow 
 
 ### Python-Code
 
-1. Änderungen an `backend/main.py` oder `backend/database.py`
+1. Änderungen an `backend/main.py`, `backend/auth.py` oder `backend/database.py`
 2. Push → Pipeline macht automatisch:
    - Python-Syntax-Check
    - DB-Backup mit Timestamp
    - Code-Backup für Rollback
+   - `pip install -r requirements.txt`
    - Files kopieren + Service-Restart
    - Health-Check
    - Bei Fehler: alte Files restoren, Service neustart
@@ -63,24 +64,14 @@ Manueller Trigger: GitHub → Actions → "Deploy Trail Atlas" → Run workflow 
 
 ### Schema-Migration
 
-SQLite hat kein automatisches Migrations-System. Neue Tabellen:
-1. In `database.py` → `init()` → `executescript()` den `CREATE TABLE IF NOT EXISTS` ergänzen
-2. Falls Tabelle auf bestehender DB fehlt: manuell anlegen:
+SQLite hat kein automatisches Migrations-System. Neue Tabellen werden in `database.py` → `init()` via `CREATE TABLE IF NOT EXISTS` angelegt (idempotent beim nächsten Restart). Neue Spalten auf bestehenden Tabellen werden in eigenen Migrationsmethoden behandelt (z.B. `_migrate_activities_user_id()` prüft per `PRAGMA table_info` ob die Spalte existiert und fügt sie ggf. hinzu).
+
+Falls doch manuell nötig:
 
 ```bash
 trail-atlas db shell
 sqlite> CREATE TABLE IF NOT EXISTS neue_tabelle (...);
 sqlite> .quit
-```
-
-Oder via Python:
-```bash
-sudo -u trail-atlas /opt/trail-atlas/venv/bin/python3 -c "
-import sqlite3
-conn = sqlite3.connect('/var/lib/trail-atlas/trail_atlas.db')
-conn.execute('CREATE TABLE IF NOT EXISTS ...')
-conn.close()
-"
 ```
 
 ---
@@ -102,8 +93,8 @@ garmin_trail_atlas_vX.Y[_qualifier]_local.html
 
 Beispiele:
   v2.6_local.html          ← IndexedDB-Version (alt)
-  v3.2_api_local.html      ← API-basiert
   v3.3_api_local.html      ← mit Sync-Status
+  v3.6_api_local.html      ← mit Invite + Signup
 ```
 
 Major: Architektur-Wechsel (v2→v3 war IndexedDB→API)
@@ -115,7 +106,7 @@ Qualifier: `_api` (API-basiert), `_local` (lokale Libraries, SRI-Platzhalter)
 version in main.py → app = FastAPI(version="X.Y.Z")
 
 Sichtbar unter:
-  GET /health → {"status":"ok","version":"1.3.0"}
+  GET /health → {"status":"ok","version":"1.6.0"}
   GET /api/docs → Swagger UI zeigt Version
 ```
 

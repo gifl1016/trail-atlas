@@ -35,6 +35,22 @@ BACKUP_DIR="/var/lib/trail-atlas/backups"
 LOG_DIR="/var/log/trail-atlas"
 SERVICE="trail-atlas"
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
+ENV_FILE="/etc/trail-atlas/garmin.env"
+
+# Sync-API-Key aus garmin.env laden (für authentifizierte API-Calls)
+SYNC_API_KEY=""
+if [ -r "$ENV_FILE" ]; then
+    SYNC_API_KEY=$(grep '^SYNC_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
+fi
+
+# Authentifizierter curl-Wrapper
+api_curl() {
+    if [ -n "$SYNC_API_KEY" ]; then
+        curl -sf -H "X-Sync-Key: $SYNC_API_KEY" "$@" 2>/dev/null
+    else
+        curl -sf "$@" 2>/dev/null
+    fi
+}
 
 # ── Farben ────────────────────────────────────────────────────────────────────
 green()  { echo -e "\033[0;32m$*\033[0m"; }
@@ -87,7 +103,7 @@ cmd_status() {
         DB_SIZE=$(sudo du -sh "$DB_FILE" | cut -f1)
         echo "   Datei:      $DB_FILE  ($DB_SIZE)"
 
-        STATS=$(curl -sf http://127.0.0.1:8000/db/stats 2>/dev/null || echo "{}")
+        STATS=$(api_curl http://127.0.0.1:8000/db/stats || echo "{}")
         if [ "$STATS" != "{}" ]; then
             ACTS=$(echo "$STATS" | grep -oP '"activities":\K\d+')
             GPS=$(echo  "$STATS" | grep -oP '"gps_points":\K\d+')
@@ -101,7 +117,7 @@ cmd_status() {
 
     echo ""
     bold "🔄 Letzter Garmin Sync"
-    SYNC=$(curl -sf http://127.0.0.1:8000/sync/status 2>/dev/null || echo "{}")
+    SYNC=$(api_curl http://127.0.0.1:8000/sync/status || echo "{}")
     if [ "$SYNC" != "{}" ]; then
         LAST=$(echo "$SYNC" | grep -oP '"started_at":"\K[^"]+' | head -1)
         STATUS=$(echo "$SYNC" | grep -oP '"status":"\K[^"]+' | head -1)
@@ -203,7 +219,7 @@ cmd_db() {
     local sub="${1:-stats}"
     case "$sub" in
         stats)
-            curl -sf http://127.0.0.1:8000/db/stats | python3 -m json.tool
+            api_curl http://127.0.0.1:8000/db/stats | python3 -m json.tool
             ;;
         backup)
             sudo -u trail-atlas mkdir -p "$BACKUP_DIR"

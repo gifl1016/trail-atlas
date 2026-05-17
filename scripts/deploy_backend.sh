@@ -31,7 +31,7 @@ echo "⛰  Trail Atlas – Backend Deploy"
 echo "══════════════════════════════════════════"
 
 # ── 1. Validierung der Staging-Files ─────────────────────────────────────────
-for required in main.py database.py; do
+for required in main.py database.py auth.py; do
     if [ ! -f "$STAGING_DIR/$required" ]; then
         red "❌  $STAGING_DIR/$required fehlt"
         exit 1

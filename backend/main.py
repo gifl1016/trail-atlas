@@ -42,6 +42,7 @@ from auth import (
     create_session_token, verify_session_token, authenticate_user,
     get_user_by_id, create_user, ensure_admin_exists,
     create_invite_code, validate_invite_code, redeem_invite_code,
+    save_garmin_credentials, get_all_garmin_users, has_garmin_credentials,
     SESSION_MAX_AGE,
 )
 
@@ -191,6 +192,8 @@ class SignupRequest(BaseModel):
     username: str
     password: str
     invite_code: str
+    garmin_email: Optional[str] = None
+    garmin_password: Optional[str] = None
 
 
 @app.post("/auth/login")
@@ -234,7 +237,7 @@ def auth_me(user: dict | None = Depends(get_current_user)):
 
 @app.post("/auth/signup")
 def signup(body: SignupRequest, response: Response):
-    """Registrierung mit Invite-Code."""
+    """Registrierung mit Invite-Code + optionale Garmin-Credentials."""
     # Invite validieren
     if not validate_invite_code(db, body.invite_code):
         raise HTTPException(status_code=400, detail="Ungültiger oder abgelaufener Einladungscode")
@@ -248,6 +251,16 @@ def signup(body: SignupRequest, response: Response):
     if len(body.password) < 8:
         raise HTTPException(status_code=400, detail="Passwort muss mindestens 8 Zeichen lang sein")
 
+    # Garmin-Credentials validieren (wenn angegeben, müssen beide Felder da sein)
+    garmin_email = (body.garmin_email or "").strip()
+    garmin_password = (body.garmin_password or "").strip()
+    has_garmin = bool(garmin_email and garmin_password)
+    if bool(garmin_email) != bool(garmin_password):
+        raise HTTPException(
+            status_code=400,
+            detail="Garmin: Email und Passwort müssen beide angegeben werden"
+        )
+
     # User anlegen
     try:
         user_id = create_user(db, username, body.password, is_admin=False)
@@ -257,14 +270,19 @@ def signup(body: SignupRequest, response: Response):
     # Invite einlösen
     redeem_invite_code(db, body.invite_code, user_id)
 
+    # Garmin-Credentials verschlüsselt speichern
+    if has_garmin:
+        save_garmin_credentials(db, user_id, garmin_email, garmin_password)
+        log.info(f"Signup: {username} – Garmin credentials saved")
+
     # Direkt einloggen
     token = create_session_token(user_id, username)
     response.set_cookie(
         key=COOKIE_NAME, value=token, max_age=SESSION_MAX_AGE,
         httponly=True, secure=True, samesite="strict", path="/",
     )
-    log.info(f"Signup: {username} (invite redeemed)")
-    return {"status": "ok", "username": username}
+    log.info(f"Signup: {username} (invite redeemed, garmin={'yes' if has_garmin else 'no'})")
+    return {"status": "ok", "username": username, "has_garmin": has_garmin}
 
 
 @app.post("/auth/invite")
@@ -701,3 +719,33 @@ def post_sync_log(entry: SyncLogEntry):
     )
     log.info(f"Sync log: {entry.status} ({entry.activities_imported} acts, {entry.gps_points_imported} pts)")
     return {"status": "logged"}
+
+
+@app.get("/sync/users")
+def get_sync_users(request: Request, user: dict | None = Depends(get_current_user)):
+    """
+    Alle User mit Garmin-Credentials zurückgeben (nur via Sync-Key).
+    Der Sync-Cronjob nutzt diesen Endpoint um zu wissen, für welche User
+    er Garmin-Daten laden soll.
+
+    Response: {"users": [{"user_id": 1, "username": "alice", "email": "..."}, ...]}
+    Hinweis: Passwörter werden hier NICHT zurückgegeben – der Cronjob
+    bekommt die verschlüsselten Credentials direkt und entschlüsselt selbst.
+    """
+    # Nur via Sync-Key erlaubt (user=None bei Key-Auth)
+    if user is not None:
+        raise HTTPException(status_code=403, detail="Nur via Sync-Key zugänglich")
+
+    rows = db.query(
+        "SELECT gc.user_id, u.username, gc.token_json "
+        "FROM garmin_credentials gc "
+        "JOIN users u ON gc.user_id = u.id"
+    )
+    users = []
+    for r in rows:
+        users.append({
+            "user_id": r["user_id"],
+            "username": r["username"],
+            "encrypted_credentials": r["token_json"],
+        })
+    return {"users": users}

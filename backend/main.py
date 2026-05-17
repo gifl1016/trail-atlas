@@ -21,6 +21,8 @@ Endpoints:
     DELETE /db/reset                   → Alle Daten löschen
     DELETE /db/gps                     → Nur GPS-Punkte löschen
     GET    /db/stats                   → DB-Statistiken
+    GET    /sync/status                → Letzte Sync-Einträge
+    POST   /sync/log                   → Sync-Ergebnis protokollieren
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Body, Request, Response, Depends, Cookie

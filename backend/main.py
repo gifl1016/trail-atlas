@@ -148,6 +148,31 @@ async def get_current_user(request: Request) -> dict | None:
     return user
 
 
+# ── User-ID Resolution ────────────────────────────────────────────────────────
+# Eingeloggte User → user_id aus Session.
+# Sync-Cronjob (user=None) → user_id aus Query-Parameter.
+# Kein User-Kontext und kein Parameter → None (z.B. Auth noch nicht aktiv).
+
+def _resolve_user_id(user: dict | None, request: Request) -> int | None:
+    """
+    Bestimmt die user_id für datenbezogene Operationen.
+
+    - Session-User: user["id"]
+    - Sync-Key (user=None): liest ?user_id= aus Query-Parametern
+    - Auth nicht aktiv (user=None, kein Param): None → kein Filter
+    """
+    if user is not None:
+        return user["id"]
+    # Sync-Cronjob oder Auth-nicht-aktiv: optionaler Query-Parameter
+    uid_param = request.query_params.get("user_id")
+    if uid_param is not None:
+        try:
+            return int(uid_param)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="user_id muss eine Zahl sein")
+    return None
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -257,18 +282,27 @@ def generate_invite(user: dict | None = Depends(get_current_user)):
 # ── Activities ────────────────────────────────────────────────────────────────
 
 @app.get("/activities")
-def get_activities(user: dict | None = Depends(get_current_user)):
-    rows = db.query(
-        "SELECT activity_id, activity_type, start_date, end_date, "
-        "start_lat, start_lng FROM activities ORDER BY start_date DESC"
-    )
+def get_activities(request: Request, user: dict | None = Depends(get_current_user)):
+    uid = _resolve_user_id(user, request)
+    if uid is not None:
+        rows = db.query(
+            "SELECT activity_id, activity_type, start_date, end_date, "
+            "start_lat, start_lng FROM activities "
+            "WHERE user_id = ? ORDER BY start_date DESC",
+            (uid,)
+        )
+    else:
+        rows = db.query(
+            "SELECT activity_id, activity_type, start_date, end_date, "
+            "start_lat, start_lng FROM activities ORDER BY start_date DESC"
+        )
     return [dict(r) for r in rows]
 
 
 @app.get("/activities/gps/all")
-def get_all_gps(user: dict | None = Depends(get_current_user)):
+def get_all_gps(request: Request, user: dict | None = Depends(get_current_user)):
     """
-    Alle GPS-Punkte aller Aktivitäten in einem einzigen Response.
+    Alle GPS-Punkte der Aktivitäten des aktuellen Users in einem Response.
     Ersetzt N einzelne /activities/{id}/gps Calls beim App-Start.
 
     Response-Format: {"points": {"activity_id_1": [[lat,lng],...], ...}}
@@ -276,9 +310,18 @@ def get_all_gps(user: dict | None = Depends(get_current_user)):
     Performance: Eine einzige SQLite-Abfrage statt N separate Queries.
     Bei 100 Touren mit je 500 Punkten: ~200-400KB JSON, <100ms Abfrage.
     """
-    rows = db.query(
-        "SELECT activity_id, lat, lng FROM gps_points ORDER BY activity_id, id"
-    )
+    uid = _resolve_user_id(user, request)
+    if uid is not None:
+        rows = db.query(
+            "SELECT g.activity_id, g.lat, g.lng FROM gps_points g "
+            "JOIN activities a ON g.activity_id = a.activity_id "
+            "WHERE a.user_id = ? ORDER BY g.activity_id, g.id",
+            (uid,)
+        )
+    else:
+        rows = db.query(
+            "SELECT activity_id, lat, lng FROM gps_points ORDER BY activity_id, id"
+        )
     result: dict[str, list] = {}
     for r in rows:
         aid = r["activity_id"]
@@ -289,17 +332,33 @@ def get_all_gps(user: dict | None = Depends(get_current_user)):
 
 
 @app.get("/activities/{activity_id}")
-def get_activity(activity_id: str, user: dict | None = Depends(get_current_user)):
-    rows = db.query(
-        "SELECT * FROM activities WHERE activity_id = ?", (activity_id,)
-    )
+def get_activity(activity_id: str, request: Request, user: dict | None = Depends(get_current_user)):
+    uid = _resolve_user_id(user, request)
+    if uid is not None:
+        rows = db.query(
+            "SELECT * FROM activities WHERE activity_id = ? AND user_id = ?",
+            (activity_id, uid)
+        )
+    else:
+        rows = db.query(
+            "SELECT * FROM activities WHERE activity_id = ?", (activity_id,)
+        )
     if not rows:
         raise HTTPException(status_code=404, detail="Aktivität nicht gefunden")
     return dict(rows[0])
 
 
 @app.get("/activities/{activity_id}/gps")
-def get_gps(activity_id: str, user: dict | None = Depends(get_current_user)):
+def get_gps(activity_id: str, request: Request, user: dict | None = Depends(get_current_user)):
+    # Ownership prüfen: gehört die Activity dem User?
+    uid = _resolve_user_id(user, request)
+    if uid is not None:
+        owner = db.query(
+            "SELECT activity_id FROM activities WHERE activity_id = ? AND user_id = ?",
+            (activity_id, uid)
+        )
+        if not owner:
+            raise HTTPException(status_code=404, detail="Aktivität nicht gefunden")
     rows = db.query(
         "SELECT lat, lng FROM gps_points WHERE activity_id = ? ORDER BY id",
         (activity_id,)
@@ -308,10 +367,17 @@ def get_gps(activity_id: str, user: dict | None = Depends(get_current_user)):
 
 
 @app.delete("/activities/{activity_id}")
-def delete_activity(activity_id: str, user: dict | None = Depends(get_current_user)):
-    existing = db.query(
-        "SELECT activity_id FROM activities WHERE activity_id = ?", (activity_id,)
-    )
+def delete_activity(activity_id: str, request: Request, user: dict | None = Depends(get_current_user)):
+    uid = _resolve_user_id(user, request)
+    if uid is not None:
+        existing = db.query(
+            "SELECT activity_id FROM activities WHERE activity_id = ? AND user_id = ?",
+            (activity_id, uid)
+        )
+    else:
+        existing = db.query(
+            "SELECT activity_id FROM activities WHERE activity_id = ?", (activity_id,)
+        )
     if not existing:
         raise HTTPException(status_code=404, detail="Aktivität nicht gefunden")
 
@@ -329,8 +395,9 @@ def delete_activity(activity_id: str, user: dict | None = Depends(get_current_us
 # ── Import ────────────────────────────────────────────────────────────────────
 
 @app.post("/import/summary")
-async def import_summary(file: UploadFile = File(...), user: dict | None = Depends(get_current_user)):
+async def import_summary(request: Request, file: UploadFile = File(...), user: dict | None = Depends(get_current_user)):
     t0 = time.monotonic()
+    uid = _resolve_user_id(user, request)
     content = await file.read()
 
     rows, headers = _parse_csv(content)
@@ -373,6 +440,7 @@ async def import_summary(file: UploadFile = File(...), user: dict | None = Depen
             (r.get("end_date") or "").strip() or None,
             coords[0],
             coords[1],
+            uid,
         ))
 
     # INSERT OR REPLACE – wenn activity_id schon existiert wird der Datensatz
@@ -380,14 +448,15 @@ async def import_summary(file: UploadFile = File(...), user: dict | None = Depen
     if batch:
         db.executemany(
             """INSERT INTO activities
-               (activity_id, activity_type, start_date, end_date, start_lat, start_lng)
-               VALUES (?, ?, ?, ?, ?, ?)
+               (activity_id, activity_type, start_date, end_date, start_lat, start_lng, user_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(activity_id) DO UPDATE SET
                  activity_type = excluded.activity_type,
                  start_date    = excluded.start_date,
                  end_date      = excluded.end_date,
                  start_lat     = excluded.start_lat,
-                 start_lng     = excluded.start_lng
+                 start_lng     = excluded.start_lng,
+                 user_id       = excluded.user_id
             """,
             batch
         )
@@ -491,16 +560,38 @@ async def import_gps(file: UploadFile = File(...), user: dict | None = Depends(g
 # ── DB Management ─────────────────────────────────────────────────────────────
 
 @app.get("/db/stats")
-def db_stats(user: dict | None = Depends(get_current_user)):
-    act_count = db.query("SELECT COUNT(*) as n FROM activities")[0]["n"]
-    gps_count = db.query("SELECT COUNT(*) as n FROM gps_points")[0]["n"]
-    no_gps    = db.query(
-        "SELECT COUNT(*) as n FROM activities a "
-        "WHERE NOT EXISTS (SELECT 1 FROM gps_points g WHERE g.activity_id = a.activity_id)"
-    )[0]["n"]
-    types = db.query(
-        "SELECT activity_type, COUNT(*) as n FROM activities GROUP BY activity_type ORDER BY n DESC"
-    )
+def db_stats(request: Request, user: dict | None = Depends(get_current_user)):
+    uid = _resolve_user_id(user, request)
+    if uid is not None:
+        act_count = db.query(
+            "SELECT COUNT(*) as n FROM activities WHERE user_id = ?", (uid,)
+        )[0]["n"]
+        gps_count = db.query(
+            "SELECT COUNT(*) as n FROM gps_points g "
+            "JOIN activities a ON g.activity_id = a.activity_id "
+            "WHERE a.user_id = ?", (uid,)
+        )[0]["n"]
+        no_gps = db.query(
+            "SELECT COUNT(*) as n FROM activities a "
+            "WHERE a.user_id = ? AND NOT EXISTS "
+            "(SELECT 1 FROM gps_points g WHERE g.activity_id = a.activity_id)",
+            (uid,)
+        )[0]["n"]
+        types = db.query(
+            "SELECT activity_type, COUNT(*) as n FROM activities "
+            "WHERE user_id = ? GROUP BY activity_type ORDER BY n DESC",
+            (uid,)
+        )
+    else:
+        act_count = db.query("SELECT COUNT(*) as n FROM activities")[0]["n"]
+        gps_count = db.query("SELECT COUNT(*) as n FROM gps_points")[0]["n"]
+        no_gps = db.query(
+            "SELECT COUNT(*) as n FROM activities a "
+            "WHERE NOT EXISTS (SELECT 1 FROM gps_points g WHERE g.activity_id = a.activity_id)"
+        )[0]["n"]
+        types = db.query(
+            "SELECT activity_type, COUNT(*) as n FROM activities GROUP BY activity_type ORDER BY n DESC"
+        )
     return {
         "activities":         act_count,
         "gps_points":         gps_count,
@@ -510,21 +601,46 @@ def db_stats(user: dict | None = Depends(get_current_user)):
 
 
 @app.delete("/db/reset")
-def db_reset(user: dict | None = Depends(get_current_user)):
-    # VACUUM darf nicht in einer Transaktion stehen
-    db.execute("DELETE FROM gps_points")
-    db.execute("DELETE FROM activities")
-    # VACUUM separat (autocommit-Modus erlaubt das)
-    db.execute("VACUUM")
-    log.info("Database reset (all data deleted)")
-    return {"status": "reset", "message": "Alle Daten gelöscht"}
+def db_reset(request: Request, user: dict | None = Depends(get_current_user)):
+    uid = _resolve_user_id(user, request)
+    if uid is not None:
+        # Nur die eigenen Aktivitäten + GPS löschen
+        db.execute(
+            "DELETE FROM gps_points WHERE activity_id IN "
+            "(SELECT activity_id FROM activities WHERE user_id = ?)",
+            (uid,)
+        )
+        db.execute("DELETE FROM activities WHERE user_id = ?", (uid,))
+        log.info(f"Database reset for user {uid}")
+        return {"status": "reset", "message": "Alle eigenen Daten gelöscht"}
+    else:
+        # Kein User-Kontext (Auth nicht aktiv) → alles löschen
+        db.execute("DELETE FROM gps_points")
+        db.execute("DELETE FROM activities")
+        db.execute("VACUUM")
+        log.info("Database reset (all data deleted)")
+        return {"status": "reset", "message": "Alle Daten gelöscht"}
 
 
 @app.delete("/db/gps")
-def db_delete_gps(user: dict | None = Depends(get_current_user)):
-    count = db.query("SELECT COUNT(*) as n FROM gps_points")[0]["n"]
-    db.execute("DELETE FROM gps_points")
-    log.info(f"GPS points deleted: {count}")
+def db_delete_gps(request: Request, user: dict | None = Depends(get_current_user)):
+    uid = _resolve_user_id(user, request)
+    if uid is not None:
+        count = db.query(
+            "SELECT COUNT(*) as n FROM gps_points g "
+            "JOIN activities a ON g.activity_id = a.activity_id "
+            "WHERE a.user_id = ?", (uid,)
+        )[0]["n"]
+        db.execute(
+            "DELETE FROM gps_points WHERE activity_id IN "
+            "(SELECT activity_id FROM activities WHERE user_id = ?)",
+            (uid,)
+        )
+        log.info(f"GPS points deleted for user {uid}: {count}")
+    else:
+        count = db.query("SELECT COUNT(*) as n FROM gps_points")[0]["n"]
+        db.execute("DELETE FROM gps_points")
+        log.info(f"GPS points deleted: {count}")
     return {"status": "ok", "gps_points_deleted": count}
 
 

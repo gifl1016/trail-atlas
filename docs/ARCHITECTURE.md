@@ -140,6 +140,33 @@ Admin → POST /api/auth/invite → generiert Einladungscode (7 Tage gültig)
 
 ---
 
+## API Endpoints
+
+| Method | Endpoint | Auth | Beschreibung |
+|--------|----------|------|-------------|
+| GET | `/health` | – | Health-Check (öffentlich) |
+| POST | `/auth/login` | – | Login → Session-Cookie |
+| POST | `/auth/logout` | – | Session-Cookie löschen |
+| GET | `/auth/me` | Session | Aktueller User (oder auth_active=false) |
+| POST | `/auth/signup` | – | Registrierung mit Invite-Code |
+| POST | `/auth/invite` | Admin | Invite-Code generieren |
+| GET | `/activities` | Session/Key | Alle Aktivitäten |
+| GET | `/activities/{id}` | Session/Key | Eine Aktivität |
+| GET | `/activities/{id}/gps` | Session/Key | GPS-Punkte einer Aktivität |
+| GET | `/activities/gps/all` | Session/Key | Alle GPS-Punkte (Bulk) |
+| DELETE | `/activities/{id}` | Session/Key | Aktivität + GPS löschen |
+| POST | `/import/summary` | Session/Key | CSV Metadaten importieren |
+| POST | `/import/gps` | Session/Key | CSV GPS-Punkte importieren |
+| GET | `/db/stats` | Session/Key | DB-Statistiken |
+| DELETE | `/db/reset` | Session/Key | Alle Daten löschen |
+| DELETE | `/db/gps` | Session/Key | Nur GPS-Punkte löschen |
+| GET | `/sync/status` | Session/Key | Letzte Sync-Einträge |
+| POST | `/sync/log` | – | Sync-Ergebnis protokollieren |
+
+**Auth-Legende:** `–` = öffentlich, `Session` = Session-Cookie, `Key` = X-Sync-Key Header, `Admin` = Session-Cookie + is_admin=1. Wenn Auth nicht aktiv ist (keine Users in DB), werden alle Endpoints durchgelassen.
+
+---
+
 ## Key Architecture Decisions
 
 ### Warum SQLite und nicht PostgreSQL?

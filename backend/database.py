@@ -152,7 +152,10 @@ class Database:
         # ── Migration: activities.user_id nachträglich hinzufügen ─────────────
         self._migrate_activities_user_id()
 
-        log.info("Database initialized (schema v2)")
+        # ── Migration: start_lat/start_lng nullable machen (Schema v3) ────
+        self._migrate_nullable_coords()
+
+        log.info("Database initialized (schema v3)")
 
     def _migrate_activities_user_id(self):
         """
@@ -183,6 +186,58 @@ class Database:
             log.info("Migration: activities.user_id + index added (existing rows → NULL)")
         else:
             log.debug("Migration: activities.user_id already present, skipping")
+
+    def _migrate_nullable_coords(self):
+        """
+        Schema v3: start_lat/start_lng von NOT NULL → nullable.
+
+        Warum? Activities ohne GPS-Track (Strength Training, Yoga, Indoor Cycling)
+        haben oft keine Startkoordinaten. Bisher wurden diese im Sync übersprungen.
+        Ab v3 werden alle Activities gespeichert, auch ohne Koordinaten.
+
+        SQLite kann NOT NULL nicht direkt entfernen. Lösung: Tabelle neu erstellen
+        und Daten migrieren. Nur nötig wenn die Spalten noch NOT NULL sind.
+        """
+        # Prüfe ob start_lat NOT NULL ist
+        cols = self._conn.execute("PRAGMA table_info(activities)").fetchall()
+        for col in cols:
+            # col: (cid, name, type, notnull, dflt_value, pk)
+            if col[1] == "start_lat" and col[3] == 1:  # notnull=1 → Migration nötig
+                log.info("Migration v3: start_lat/start_lng → nullable")
+                with self._lock:
+                    self._conn.executescript("""
+                        BEGIN;
+
+                        CREATE TABLE activities_new (
+                            activity_id   TEXT PRIMARY KEY,
+                            activity_type TEXT NOT NULL DEFAULT 'unknown',
+                            start_date    TEXT NOT NULL,
+                            end_date      TEXT,
+                            start_lat     REAL,
+                            start_lng     REAL,
+                            user_id       INTEGER REFERENCES users(id)
+                        );
+
+                        INSERT INTO activities_new
+                            SELECT activity_id, activity_type, start_date, end_date,
+                                   start_lat, start_lng, user_id
+                            FROM activities;
+
+                        DROP TABLE activities;
+                        ALTER TABLE activities_new RENAME TO activities;
+
+                        CREATE INDEX IF NOT EXISTS idx_activities_date
+                            ON activities (start_date DESC);
+                        CREATE INDEX IF NOT EXISTS idx_activities_type
+                            ON activities (activity_type);
+                        CREATE INDEX IF NOT EXISTS idx_activities_user
+                            ON activities (user_id);
+
+                        COMMIT;
+                    """)
+                log.info("Migration v3: activities table recreated (nullable coords + indices)")
+                return
+        log.debug("Migration v3: start_lat already nullable, skipping")
 
     def close(self):
         if self._conn is not None:

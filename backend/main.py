@@ -83,8 +83,7 @@ app.add_middleware(
 )
 
 # ── Validation helpers ────────────────────────────────────────────────────────
-SUMMARY_REQUIRED = {"activity_id", "activity_type", "start_date",
-                    "start_latitude", "start_longitude"}
+SUMMARY_REQUIRED = {"activity_id", "activity_type", "start_date"}
 GPS_REQUIRED     = {"activity_id", "latitude", "longitude"}
 
 def _validate_coord(lat: str, lng: str) -> tuple[float, float] | None:
@@ -441,11 +440,12 @@ async def import_summary(request: Request, file: UploadFile = File(...), user: d
             duplicates += 1; continue
         seen_ids.add(aid)
 
+        # Koordinaten optional: NULL wenn nicht vorhanden oder ungültig
         coords = _validate_coord(
             r.get("start_latitude", ""), r.get("start_longitude", "")
         )
-        if not coords:
-            skipped += 1; continue
+        lat = coords[0] if coords else None
+        lng = coords[1] if coords else None
 
         start = (r.get("start_date") or "").strip()
         if not start:
@@ -456,8 +456,8 @@ async def import_summary(request: Request, file: UploadFile = File(...), user: d
             (r.get("activity_type") or "unknown").strip(),
             start,
             (r.get("end_date") or "").strip() or None,
-            coords[0],
-            coords[1],
+            lat,
+            lng,
             uid,
         ))
 

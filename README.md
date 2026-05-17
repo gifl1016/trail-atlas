@@ -64,6 +64,8 @@ trail-atlas/
 │   └── garmin.env.example      ← Konfigurations-Template
 ├── scripts/
 │   ├── deploy.sh               ← Server-seitiges Frontend-Deploy
+│   ├── deploy_backend.sh       ← Backend-Deploy mit Backup + Rollback
+│   ├── deploy_garmin_sync.sh   ← Sync-Script Deploy
 │   ├── ops.sh                  ← CLI-Helper (trail-atlas Befehl)
 │   └── sudoers_trail_atlas.txt ← Sudoers-Konfiguration
 ├── src/

@@ -14,7 +14,6 @@ Internet
 │  Nginx                                    │
 │  ├── TLS 1.2/1.3 (Let's Encrypt)         │
 │  ├── HSTS (max-age=63072000)              │
-│  ├── Basic Auth (.htpasswd)               │
 │  ├── Security Headers (CSP, X-Frame, ...) │
 │  └── Reverse Proxy → localhost:8000       │
 └───────────────────────┬───────────────────┘
@@ -22,6 +21,8 @@ Internet
                         ▼
 ┌───────────────────────────────────────────┐
 │  FastAPI                                  │
+│  ├── Session-Auth (signierte Cookies)     │
+│  ├── Sync-API-Key (Cronjob-Zugriff)      │
 │  ├── Input Validation (Koordinaten, CSV)  │
 │  ├── CORS: nur localhost                  │
 │  └── redirect_slashes=False               │
@@ -48,13 +49,30 @@ Internet
 
 ## Authentifizierung
 
-**Nginx Basic Auth** schützt sowohl Frontend als auch API.
+### App-Auth (Session-basiert, seit v1.5.0)
 
-- Credential-Datei: `/etc/nginx/.htpasswd` (bcrypt-Hashes)
-- App im Browser nutzt automatisch die Browser-Session (Credentials werden beim ersten Aufruf abgefragt und für die Session gespeichert)
-- API-Calls aus dem Frontend senden Credentials via `credentials: "include"`
+Trail Atlas nutzt ein eigenes Auth-System mit drei Komponenten:
 
-**Garmin-Sync Script** authentifiziert sich mit API_USER/API_PASS aus `/etc/trail-atlas/garmin.env` direkt gegen localhost:8000 (umgeht Nginx).
+**Login:** User gibt Username + Passwort ein → `POST /auth/login` → Backend prüft bcrypt-Hash → signierter Session-Cookie wird gesetzt (`httponly`, `secure`, `samesite=strict`).
+
+**Sessions:** Der Cookie enthält einen mit `itsdangerous` signierten Token (Payload: User-ID + Username). Max-Age: 30 Tage. Der Server kann Sessions durch Ändern des `SECRET_KEY` sofort invalidieren.
+
+**Invite-Codes:** Neue User registrieren sich über Einladungscodes. Codes sind einmalig verwendbar, laufen nach 7 Tagen ab, und können nur von Admins generiert werden (`POST /auth/invite`).
+
+### Sync-API-Key (Cronjob)
+
+Der Garmin-Sync-Cronjob authentifiziert sich über den HTTP-Header `X-Sync-Key` mit einem geteilten Secret (`SYNC_API_KEY` in `garmin.env`). Der Cronjob läuft lokal auf der VM und greift über `127.0.0.1:8000` zu – der Key ist trotzdem nötig, da die App-Auth sonst alle unauthentifizierten Requests blockiert.
+
+### Übergangslogik
+
+Die Auth-Dependency `get_current_user` prüft in dieser Reihenfolge:
+1. `X-Sync-Key` Header → Cronjob-Zugriff
+2. Keine Users in DB → Auth nicht aktiv (Erstinstallation)
+3. Session-Cookie → normaler User-Login
+
+### Historisch: Nginx Basic Auth (entfernt in Schritt 5)
+
+Bis v1.4.0 schützte Nginx Basic Auth die gesamte App. Ab v1.5.0 wurde App-eigene Auth eingeführt, ab v1.6.0 ist Basic Auth vollständig entfernt.
 
 ---
 
@@ -124,11 +142,13 @@ Ungültige Zeilen werden übersprungen und in der Response als `skipped` gezähl
 
 | Credential | Ort | Berechtigungen |
 |-----------|-----|---------------|
-| Nginx Basic Auth | `/etc/nginx/.htpasswd` | `root:root 644` |
+| User-Passwörter | SQLite `users.password_hash` (bcrypt) | DB-Datei: `trail-atlas:trail-atlas 600` |
+| Session-Secret | `SECRET_KEY` in `/etc/trail-atlas/garmin.env` | `trail-atlas:trail-atlas 600` |
+| Sync-API-Key | `SYNC_API_KEY` in `/etc/trail-atlas/garmin.env` | `trail-atlas:trail-atlas 600` |
+| Admin-Credentials | `ADMIN_USER`/`ADMIN_PASS` in `garmin.env` (nur für initialen Bootstrap) | `trail-atlas:trail-atlas 600` |
 | Garmin Email+Passwort | `/etc/trail-atlas/garmin.env` | `trail-atlas:trail-atlas 600` |
 | Garmin Session-Token | `/var/lib/trail-atlas/garmin_token.json` | `trail-atlas:trail-atlas 600` |
 | SSH Deploy-Key | GitHub Secrets (verschlüsselt) | nie auf Disk |
-| Basic Auth für Health-Check | GitHub Secrets | nie auf Disk |
 
 **Keine Credentials liegen im Git-Repository.** `garmin.env.example` enthält nur Platzhalter.
 
@@ -140,6 +160,7 @@ Der Backend-Service läuft als unprivilegierter User mit Sicherheitsrestriktione
 
 ```ini
 User=trail-atlas
+EnvironmentFile=/etc/trail-atlas/garmin.env
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -162,7 +183,7 @@ Einziger öffentlicher Endpunkt: Nginx auf Port 443.
 
 ## Bekannte Limitierungen
 
-- **Basic Auth über HTTP Header:** Credentials werden base64-encodiert gesendet (nicht verschlüsselt) – aber TLS schützt den Transport.
 - **`unsafe-inline` in CSP:** nötig weil JS/CSS in der HTML-Datei liegen. Ein separates JS-Bundle würde das eliminieren.
 - **Garmin-Passwort auf Disk:** Steht in `garmin.env`. Risiko minimiert durch chmod 600 + systemd-User.
-- **Kein Rate-Limiting:** Die API hat kein eigenes Rate-Limit. Nginx Basic Auth und die geringe Nutzerzahl machen das akzeptabel.
+- **Kein Rate-Limiting:** Die API hat kein eigenes Rate-Limit. Session-Auth und die geringe Nutzerzahl machen das akzeptabel.
+- **Session-Token-Signierung, nicht Verschlüsselung:** Der Cookie-Inhalt (User-ID, Username) ist base64-lesbar aber manipulationssicher (HMAC-signiert). Kein sensibles Datum im Payload.

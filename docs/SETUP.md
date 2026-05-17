@@ -33,7 +33,7 @@ chmod 700 ~/duckdns/duck.sh
 
 ```bash
 sudo apt update
-sudo apt install -y nginx certbot python3-certbot-nginx apache2-utils
+sudo apt install -y nginx certbot python3-certbot-nginx
 
 # Initiale Nginx Config
 sudo nano /etc/nginx/sites-available/trail-atlas
@@ -61,15 +61,11 @@ sudo certbot --nginx -d trail-atlas.duckdns.org --email deine@email.com --agree-
 # → "2" wählen für HTTP→HTTPS Redirect
 ```
 
-### 1.4 Basic Auth
+### 1.4 Vollständige Nginx Config
 
-```bash
-sudo htpasswd -c /etc/nginx/.htpasswd deinname
-```
+Ersetze `/etc/nginx/sites-available/trail-atlas` mit der Production-Config (siehe `trail-atlas-v2.nginx.conf` im Repo). Wichtige Bestandteile: HTTPS, Security-Header, Gzip, `/api/` Proxy, `/libs/` Caching.
 
-### 1.5 Vollständige Nginx Config
-
-Ersetze `/etc/nginx/sites-available/trail-atlas` mit der Production-Config (siehe `trail-atlas-v2.nginx.conf` im Repo). Wichtige Bestandteile: HTTPS, Basic Auth, Security-Header, Gzip, `/api/` Proxy, `/libs/` Caching.
+> **Hinweis:** Basic Auth (`auth_basic`) wird nicht mehr benötigt. Die App nutzt eigene Session-Auth. Falls noch vorhanden, auskommentieren.
 
 ```bash
 sudo nginx -t && sudo systemctl reload nginx
@@ -93,28 +89,84 @@ sudo chmod 750 /var/lib/trail-atlas
 ```bash
 sudo apt install -y python3-venv python3-pip sqlite3
 python3 -m venv /opt/trail-atlas/venv
-sudo /opt/trail-atlas/venv/bin/pip install fastapi uvicorn python-multipart
+sudo /opt/trail-atlas/venv/bin/pip install fastapi uvicorn python-multipart bcrypt itsdangerous
 ```
 
 ### 2.3 Backend-Code deployen
 
 ```bash
 # Dateien kopieren (initial manuell, danach via GitHub Actions)
-sudo cp main.py database.py /opt/trail-atlas/backend/
+sudo cp main.py auth.py database.py /opt/trail-atlas/backend/
 sudo chown -R trail-atlas:trail-atlas /opt/trail-atlas
 ```
 
-### 2.4 Systemd Service
+### 2.4 Konfiguration (garmin.env)
+
+```bash
+sudo mkdir -p /etc/trail-atlas
+sudo cp garmin.env.example /etc/trail-atlas/garmin.env
+sudo chown -R trail-atlas:trail-atlas /etc/trail-atlas
+sudo chmod 750 /etc/trail-atlas
+sudo chmod 600 /etc/trail-atlas/garmin.env
+sudo nano /etc/trail-atlas/garmin.env
+```
+
+Inhalt der garmin.env:
+
+```env
+# Garmin Connect Login
+GARMIN_EMAIL=deine@email.com
+GARMIN_PASSWORD=dein-garmin-passwort
+
+# Trail Atlas API (lokal)
+API_BASE=http://127.0.0.1:8000
+
+# Auth: Session-Secret (python3 -c "import secrets; print(secrets.token_hex(32))")
+SECRET_KEY=dein-langer-zufaelliger-hex-string
+
+# Auth: Admin-Account (wird beim ersten Start automatisch angelegt)
+ADMIN_USER=dein-admin-username
+ADMIN_PASS=dein-sicheres-passwort
+
+# Auth: Sync-API-Key für den Cronjob (python3 -c "import secrets; print(secrets.token_hex(32))")
+SYNC_API_KEY=dein-sync-api-key
+```
+
+### 2.5 Systemd Service
 
 ```bash
 sudo cp trail-atlas.service /etc/systemd/system/
+```
+
+**Wichtig:** Der Service muss die `garmin.env` als Umgebungsvariablen laden:
+
+```bash
+sudo systemctl edit trail-atlas
+```
+
+Folgenden Inhalt einfügen:
+
+```ini
+[Service]
+EnvironmentFile=/etc/trail-atlas/garmin.env
+```
+
+```bash
 sudo systemctl daemon-reload
 sudo systemctl enable trail-atlas
 sudo systemctl start trail-atlas
-curl http://127.0.0.1:8000/health   # → {"status":"ok",...}
+curl http://127.0.0.1:8000/health   # → {"status":"ok","version":"1.6.0"}
 ```
 
-### 2.5 Nginx API-Proxy
+Prüfe im Log ob der Admin-Account erstellt wurde:
+
+```bash
+sudo journalctl -u trail-atlas -n 20
+# → "User created: dein-username (id=1, admin=True)"
+# → "Assigned N existing activities to admin 'dein-username'"
+```
+
+### 2.6 Nginx API-Proxy
 
 Die `/api/` Location muss im HTTPS server{} Block stehen (siehe `nginx_api_snippet.conf`).
 
@@ -136,26 +188,14 @@ sudo chown -R trail-atlas:trail-atlas /opt/trail-atlas/garmin-sync
 sudo chmod 750 /opt/trail-atlas/garmin-sync/garmin_sync.py
 ```
 
-### 3.2 Credentials
-
-```bash
-sudo mkdir -p /etc/trail-atlas
-sudo cp garmin.env.example /etc/trail-atlas/garmin.env
-sudo chown -R trail-atlas:trail-atlas /etc/trail-atlas
-sudo chmod 750 /etc/trail-atlas
-sudo chmod 600 /etc/trail-atlas/garmin.env
-sudo nano /etc/trail-atlas/garmin.env
-# → GARMIN_EMAIL, GARMIN_PASSWORD, API_USER, API_PASS eintragen
-```
-
-### 3.3 Initial-Test
+### 3.2 Initial-Test
 
 ```bash
 sudo -u trail-atlas /opt/trail-atlas/venv/bin/python3 \
-  /opt/trail-atlas/garmin-sync/garmin_sync.py --limit 1
+  /opt/trail-atlas/garmin-sync/garmin_sync.py --dry-run
 ```
 
-### 3.4 Cronjob + Logrotate
+### 3.3 Cronjob + Logrotate
 
 ```bash
 sudo tee /etc/cron.d/trail-atlas-garmin-sync << 'EOF'
@@ -208,8 +248,8 @@ Repository → Settings → Secrets → Actions:
 | `SSH_PRIVATE_KEY` | Inhalt von `~/.ssh/github_deploy` |
 | `VM_HOST` | `trail-atlas.duckdns.org` |
 | `VM_USER` | `ubuntu` (oder dein SSH-User) |
-| `BASIC_AUTH_USER` | Nginx Basic Auth User |
-| `BASIC_AUTH_PASS` | Nginx Basic Auth Passwort |
+
+> **Hinweis:** `BASIC_AUTH_USER` und `BASIC_AUTH_PASS` werden nicht mehr benötigt (Basic Auth entfernt seit v1.6.0).
 
 ### 4.4 Sudoers
 
@@ -239,8 +279,9 @@ trail-atlas status
 ```bash
 trail-atlas status    # alle Komponenten grün?
 trail-atlas health    # API + HTTPS erreichbar?
-trail-atlas sync 1    # Garmin-Sync funktioniert?
+trail-atlas sync dry  # Garmin-Sync + API-Key funktioniert?
+trail-atlas sync 1    # Test-Sync: 1 Tour importieren
 trail-atlas db stats  # Daten in der DB?
 ```
 
-Im Browser: `https://trail-atlas.duckdns.org` → Login → Karte mit Tracks.
+Im Browser: `https://trail-atlas.duckdns.org` → Login-Screen → Anmelden → Karte mit Tracks.

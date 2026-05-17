@@ -228,6 +228,13 @@
   .invite-link{font-size:11px;color:#888;word-break:break-all;margin-top:4px}
   .invite-copy-btn{display:inline-block;margin-top:8px;padding:5px 12px;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:6px;color:#888;font-size:11px;cursor:pointer;font-family:inherit}
   .invite-copy-btn:active{background:#252525;color:#00e5ff}
+  .signup-garmin-toggle{font-size:12px;color:#555;margin:4px 0 12px;cursor:pointer;display:flex;align-items:center;gap:6px}
+  .signup-garmin-toggle:hover{color:#00e5ff}
+  .signup-garmin-toggle .arrow{color:#00e5ff88;transition:transform .2s;display:inline-block}
+  .signup-garmin-toggle .arrow.open{transform:rotate(90deg)}
+  .signup-garmin-fields{display:none;margin-bottom:12px}
+  .signup-garmin-fields.show{display:block}
+  .signup-garmin-hint{font-size:10px;color:#444;margin:-6px 0 12px 2px;line-height:1.5}
   .login-user-info{position:absolute;top:12px;right:12px;z-index:600;display:none;align-items:center;gap:8px;background:rgba(10,10,10,.88);border:1px solid #1f1f1f;border-radius:8px;padding:5px 10px;backdrop-filter:blur(4px)}
   .login-user-info.show{display:flex}
   .login-user-name{font-size:11px;color:#888}
@@ -265,6 +272,14 @@
         <input class="login-input" id="signup-code" type="text" placeholder="Einladungscode" autocomplete="off">
         <input class="login-input" id="signup-user" type="text" placeholder="Benutzername wählen" autocomplete="username" autocapitalize="none">
         <input class="login-input" id="signup-pass" type="password" placeholder="Passwort (min. 8 Zeichen)" autocomplete="new-password">
+        <p class="signup-garmin-toggle" onclick="toggleGarminFields()">
+          <span class="arrow" id="garmin-arrow">▶</span> Garmin Connect verknüpfen
+        </p>
+        <div class="signup-garmin-fields" id="garmin-fields">
+          <p class="signup-garmin-hint">Optional – deine Touren werden automatisch synchronisiert.</p>
+          <input class="login-input" id="signup-garmin-email" type="email" placeholder="Garmin Email" autocomplete="off">
+          <input class="login-input" id="signup-garmin-pass" type="password" placeholder="Garmin Passwort" autocomplete="off">
+        </div>
         <button class="login-submit" id="signup-btn" onclick="doSignup()">Registrieren</button>
         <p class="login-error" id="signup-error"></p>
         <p class="login-toggle" onclick="toggleSignup(false)"><span>←</span> Zurück zum Login</p>
@@ -1516,26 +1531,46 @@ function toggleSignup(showSignup) {
   }
 }
 
+function toggleGarminFields() {
+  const fields = document.getElementById("garmin-fields");
+  const arrow = document.getElementById("garmin-arrow");
+  const isOpen = fields.classList.toggle("show");
+  arrow.classList.toggle("open", isOpen);
+  if (isOpen) document.getElementById("signup-garmin-email").focus();
+}
+
 async function doSignup() {
   const btn   = document.getElementById("signup-btn");
   const errEl = document.getElementById("signup-error");
   const code  = document.getElementById("signup-code").value.trim();
   const user  = document.getElementById("signup-user").value.trim();
   const pass  = document.getElementById("signup-pass").value;
+  const gEmail = document.getElementById("signup-garmin-email").value.trim();
+  const gPass  = document.getElementById("signup-garmin-pass").value;
 
   if (!code) { errEl.textContent = "Bitte Einladungscode eingeben"; return; }
   if (!user || user.length < 3) { errEl.textContent = "Benutzername muss mind. 3 Zeichen haben"; return; }
   if (pass.length < 8) { errEl.textContent = "Passwort muss mind. 8 Zeichen haben"; return; }
+  if ((gEmail && !gPass) || (!gEmail && gPass)) {
+    errEl.textContent = "Garmin: bitte Email und Passwort angeben oder beide leer lassen";
+    return;
+  }
 
   btn.disabled = true;
   errEl.textContent = "";
+
+  const body = {username: user, password: pass, invite_code: code};
+  if (gEmail && gPass) {
+    body.garmin_email = gEmail;
+    body.garmin_password = gPass;
+  }
 
   try {
     const res = await fetch(API_BASE + "/auth/signup", {
       method: "POST",
       credentials: "include",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({username: user, password: pass, invite_code: code})
+      body: JSON.stringify(body)
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Registrierung fehlgeschlagen");
@@ -1558,13 +1593,27 @@ async function doSignup() {
 
 // Enter key in signup fields
 document.getElementById("signup-pass").addEventListener("keydown", e => {
-  if (e.key === "Enter") doSignup();
+  if (e.key === "Enter") {
+    // If garmin fields are open, focus garmin email; otherwise submit
+    const gFields = document.getElementById("garmin-fields");
+    if (gFields.classList.contains("show")) {
+      document.getElementById("signup-garmin-email").focus();
+    } else {
+      doSignup();
+    }
+  }
 });
 document.getElementById("signup-code").addEventListener("keydown", e => {
   if (e.key === "Enter") document.getElementById("signup-user").focus();
 });
 document.getElementById("signup-user").addEventListener("keydown", e => {
   if (e.key === "Enter") document.getElementById("signup-pass").focus();
+});
+document.getElementById("signup-garmin-email").addEventListener("keydown", e => {
+  if (e.key === "Enter") document.getElementById("signup-garmin-pass").focus();
+});
+document.getElementById("signup-garmin-pass").addEventListener("keydown", e => {
+  if (e.key === "Enter") doSignup();
 });
 
 // Auto-show signup form if ?invite= parameter is in URL

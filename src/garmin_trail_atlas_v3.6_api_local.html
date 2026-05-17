@@ -650,55 +650,61 @@ async function renderTracks(fitView = false) {
     for (const act of batch) {
       // Use preloaded GPS cache – no API call needed per track
       const rawPts = gpsCache[act.activity_id];
-      if (!rawPts || rawPts.length < 2) continue;
-      const pts = rawPts.map(([lat,lng]) => ({lat, lng}));
-
-      if (!activityDists[act.activity_id]) activityDists[act.activity_id] = haversineKm(pts);
-      totalPtsEstimate += pts.length;
-      usedTypes.add(act.activity_type);
-
-      const baseStep   = Math.max(1, Math.floor(pts.length / 300));
-      const globalStep = totalPtsEstimate > MAX_RENDER_PTS
-        ? Math.ceil(totalPtsEstimate / MAX_RENDER_PTS) : 1;
-      const step = Math.max(baseStep, globalStep);
-
-      const lls = pts.filter((_,j)=>j%step===0).map(p=>[p.lat,p.lng]);
-      allLL.push(...lls);
+      const hasTrack = rawPts && rawPts.length >= 2;
 
       const c    = getColor(act.activity_type);
-      // Determine initial visual state based on selection
       const isSel  = selectedActivityId && act.activity_id === selectedActivityId;
       const isDim  = selectedActivityId && act.activity_id !== selectedActivityId;
-      const weight  = isSel ? 7 : 5;
-      const opacity = isDim ? 0.18 : 0.85;
-      const color   = isDim ? "#555" : c;
 
-      const poly = L.polyline(lls,{color, weight, opacity, lineCap:"round", renderer:canvasRenderer}).addTo(map);
-      poly._actId = act.activity_id;
-      poly._baseColor = c;
-      poly.on("click", ()=>selectActivity(act));
-      // Hover: re-read current dim state at call time so it stays correct after selection changes
-      poly.on("mouseover",()=>{
-        const dimNow = selectedActivityId && poly._actId !== selectedActivityId;
-        if (!dimNow) poly.setStyle({weight: selectedActivityId && poly._actId===selectedActivityId ? 11 : 9, opacity:1});
-      });
-      poly.on("mouseout",()=>{
-        const selNow = selectedActivityId && poly._actId === selectedActivityId;
-        const dimNow = selectedActivityId && poly._actId !== selectedActivityId;
-        poly.setStyle({weight: selNow?7:5, opacity: dimNow?0.18:0.85});
-      });
-      polylines.push(poly);
+      if (hasTrack) {
+        const pts = rawPts.map(([lat,lng]) => ({lat, lng}));
 
-      // Start marker
-      const icon = L.divIcon({
-        className: "",
-        html: `<div class="start-marker" style="background:${isDim?"#555":c};opacity:${isDim?0.3:1}"></div>`,
-        iconSize: [17,17], iconAnchor: [8,8]
-      });
-      const marker = L.marker([act.start_lat, act.start_lng], {icon, zIndexOffset:100});
-      marker.on("click", ()=>selectActivity(act));
-      marker._actId = act.activity_id;
-      markers.push(marker);
+        if (!activityDists[act.activity_id]) activityDists[act.activity_id] = haversineKm(pts);
+        totalPtsEstimate += pts.length;
+        usedTypes.add(act.activity_type);
+
+        const baseStep   = Math.max(1, Math.floor(pts.length / 300));
+        const globalStep = totalPtsEstimate > MAX_RENDER_PTS
+          ? Math.ceil(totalPtsEstimate / MAX_RENDER_PTS) : 1;
+        const step = Math.max(baseStep, globalStep);
+
+        const lls = pts.filter((_,j)=>j%step===0).map(p=>[p.lat,p.lng]);
+        allLL.push(...lls);
+
+        const weight  = isSel ? 7 : 5;
+        const opacity = isDim ? 0.18 : 0.85;
+        const color   = isDim ? "#555" : c;
+
+        const poly = L.polyline(lls,{color, weight, opacity, lineCap:"round", renderer:canvasRenderer}).addTo(map);
+        poly._actId = act.activity_id;
+        poly._baseColor = c;
+        poly.on("click", ()=>selectActivity(act));
+        poly.on("mouseover",()=>{
+          const dimNow = selectedActivityId && poly._actId !== selectedActivityId;
+          if (!dimNow) poly.setStyle({weight: selectedActivityId && poly._actId===selectedActivityId ? 11 : 9, opacity:1});
+        });
+        poly.on("mouseout",()=>{
+          const selNow = selectedActivityId && poly._actId === selectedActivityId;
+          const dimNow = selectedActivityId && poly._actId !== selectedActivityId;
+          poly.setStyle({weight: selNow?7:5, opacity: dimNow?0.18:0.85});
+        });
+        polylines.push(poly);
+      }
+
+      // Start marker: show for all activities with coordinates (even without GPS track)
+      if (act.start_lat != null && act.start_lng != null) {
+        if (!hasTrack) usedTypes.add(act.activity_type);
+        if (!hasTrack && !isDim) allLL.push([act.start_lat, act.start_lng]);
+        const icon = L.divIcon({
+          className: "",
+          html: `<div class="start-marker" style="background:${isDim?"#555":c};opacity:${isDim?0.3:1}"></div>`,
+          iconSize: [17,17], iconAnchor: [8,8]
+        });
+        const marker = L.marker([act.start_lat, act.start_lng], {icon, zIndexOffset:100});
+        marker.on("click", ()=>selectActivity(act));
+        marker._actId = act.activity_id;
+        markers.push(marker);
+      }
     }
 
     loaderText.textContent = `${Math.min(i+BATCH, filtered.length)} / ${filtered.length} Touren`;

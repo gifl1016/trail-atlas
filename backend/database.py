@@ -205,6 +205,11 @@ class Database:
             if col[1] == "start_lat" and col[3] == 1:  # notnull=1 → Migration nötig
                 log.info("Migration v3: start_lat/start_lng → nullable")
                 with self._lock:
+                    # Foreign Keys temporär deaktivieren – sonst blockt SQLite
+                    # das DROP TABLE wegen gps_points REFERENCES activities.
+                    # PRAGMA foreign_keys kann nicht innerhalb einer Transaktion
+                    # geändert werden, daher vor BEGIN.
+                    self._conn.execute("PRAGMA foreign_keys=OFF")
                     self._conn.executescript("""
                         BEGIN;
 
@@ -235,6 +240,7 @@ class Database:
 
                         COMMIT;
                     """)
+                    self._conn.execute("PRAGMA foreign_keys=ON")
                 log.info("Migration v3: activities table recreated (nullable coords + indices)")
                 return
         log.debug("Migration v3: start_lat already nullable, skipping")

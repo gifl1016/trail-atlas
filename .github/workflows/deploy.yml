@@ -115,10 +115,10 @@ jobs:
         run: |
           sleep 3
           CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -u "${{ secrets.BASIC_AUTH_USER }}:${{ secrets.BASIC_AUTH_PASS }}" \
             "https://${{ secrets.VM_HOST }}")
           echo "HTML status: $CODE"
-          [ "$CODE" = "200" ] || exit 1
+          # 200 = OK, 401 = App-Auth aktiv (kein Basic Auth mehr) – beides gut
+          [ "$CODE" = "200" ] || [ "$CODE" = "401" ] || exit 1
 
       - name: Cleanup
         if: always()
@@ -157,7 +157,6 @@ jobs:
         run: |
           sleep 3
           CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -u "${{ secrets.BASIC_AUTH_USER }}:${{ secrets.BASIC_AUTH_PASS }}" \
             "https://${{ secrets.VM_HOST }}/api/health")
           echo "API status: $CODE"
           [ "$CODE" = "200" ] || exit 1

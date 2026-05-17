@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
 """
-garmin_sync.py
-==============
-Läd Aktivitäten von Garmin Connect und postet sie direkt an die Trail Atlas API.
+garmin_sync.py – Multi-User Garmin Sync
+========================================
+Läd Aktivitäten von Garmin Connect für ALLE User mit Garmin-Credentials
+und postet sie an die Trail Atlas API (mit user_id-Parameter).
 
 Verwendung:
-    python3 garmin_sync.py                    # alle neuen Touren
-    python3 garmin_sync.py --limit 1          # nur die neueste neue Tour
-    python3 garmin_sync.py --limit 5          # die 5 neuesten neuen Touren
+    python3 garmin_sync.py                    # alle User, alle neuen Touren
+    python3 garmin_sync.py --limit 1          # pro User max 1 neue Tour
     python3 garmin_sync.py --dry-run          # zeigt was gemacht würde
-    python3 garmin_sync.py --full-resync      # alle Touren der letzten N Tage
-                                              # (auch wenn schon in DB)
+    python3 garmin_sync.py --full-resync      # auch existierende Touren
+    python3 garmin_sync.py --user 2           # nur User mit ID 2 syncen
 
 Konfiguration: /etc/trail-atlas/garmin.env
+    → API_BASE, SYNC_API_KEY, SECRET_KEY (für Credential-Entschlüsselung)
+
+Ablauf:
+    1. GET /sync/users → Liste aller User mit verschlüsselten Garmin-Credentials
+    2. Für jeden User: Credentials entschlüsseln → Garmin Login → Aktivitäten laden
+    3. POST /import/summary?user_id=X + /import/gps?user_id=X
+    4. POST /sync/log (Statistik)
 """
 
 import argparse
+import base64
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -38,6 +47,12 @@ try:
     )
 except ImportError:
     print("❌ garminconnect nicht installiert: pip install garminconnect")
+    sys.exit(1)
+
+try:
+    from cryptography.fernet import Fernet
+except ImportError:
+    print("❌ cryptography nicht installiert: pip install cryptography")
     sys.exit(1)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -64,6 +79,20 @@ def load_env():
         k, v = line.split("=", 1)
         env[k.strip()] = v.strip().strip('"').strip("'")
     return env
+
+# ── Fernet für Credential-Entschlüsselung ────────────────────────────────────
+# Identische Ableitung wie in auth.py: SHA256(SECRET_KEY) → base64 → Fernet-Key
+
+def _init_fernet(secret_key: str) -> Fernet:
+    fernet_key = base64.urlsafe_b64encode(
+        hashlib.sha256(secret_key.encode()).digest()
+    )
+    return Fernet(fernet_key)
+
+def decrypt_credentials(fernet: Fernet, encrypted: str) -> dict:
+    """Entschlüsselt {"email": "...", "password": "..."}."""
+    decrypted = fernet.decrypt(encrypted.encode("utf-8"))
+    return json.loads(decrypted.decode("utf-8"))
 
 # ── Aktivitätstyp-Mapping ────────────────────────────────────────────────────
 ACTIVITY_TYPE_MAP = {
@@ -100,52 +129,55 @@ ACTIVITY_TYPE_MAP = {
 def normalize_type(t: str) -> str:
     return ACTIVITY_TYPE_MAP.get(t.lower(), t.lower())
 
-# ── Token Management ─────────────────────────────────────────────────────────
-TOKEN_FILE = Path(os.getenv("GARMIN_TOKEN_FILE", "/var/lib/trail-atlas/garmin_token.json"))
+# ── Token Management (pro User) ─────────────────────────────────────────────
+TOKEN_DIR = Path(os.getenv("GARMIN_TOKEN_DIR", "/var/lib/trail-atlas/garmin_tokens"))
 
-def load_token():
-    if TOKEN_FILE.exists():
+def _token_path(user_id: int) -> Path:
+    return TOKEN_DIR / f"{user_id}.json"
+
+def load_token(user_id: int):
+    path = _token_path(user_id)
+    if path.exists():
         try:
-            return json.loads(TOKEN_FILE.read_text())
+            return json.loads(path.read_text())
         except Exception as e:
-            log.warning(f"Token-Datei korrupt: {e}")
+            log.warning(f"Token-Datei korrupt für user {user_id}: {e}")
     return None
 
-def save_token(token):
-    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN_FILE.write_text(json.dumps(token))
-    TOKEN_FILE.chmod(0o600)
+def save_token(user_id: int, token):
+    TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+    path = _token_path(user_id)
+    path.write_text(json.dumps(token))
+    path.chmod(0o600)
 
-def login_garmin(env) -> Garmin:
-    saved = load_token()
+def login_garmin_for_user(user_id: int, email: str, password: str) -> Garmin:
+    """Garmin-Login für einen bestimmten User (Token-Cache pro User)."""
+    # 1. Gespeichertes Token versuchen
+    saved = load_token(user_id)
     if saved:
-        log.info("Verwende gespeichertes Garmin-Token")
+        log.info(f"   Verwende gespeichertes Token")
         try:
             client = Garmin()
             client.login(saved)
             return client
         except Exception as e:
-            log.warning(f"Token ungültig, fresh login: {e}")
+            log.warning(f"   Token ungültig, fresh login: {e}")
 
-    email    = env.get("GARMIN_EMAIL")
-    password = env.get("GARMIN_PASSWORD")
-    if not email or not password:
-        log.error("GARMIN_EMAIL/GARMIN_PASSWORD fehlen in garmin.env")
-        sys.exit(1)
-
-    log.info(f"Login: {email}")
+    # 2. Fresh login mit Email/Passwort
+    log.info(f"   Login: {email}")
     client = Garmin(email=email, password=password)
     try:
         client.login()
     except GarminConnectAuthenticationError:
-        log.error("Login fehlgeschlagen – Email/Passwort prüfen")
+        log.error(f"   Login fehlgeschlagen für {email}")
         raise
 
+    # 3. Token speichern
     try:
-        save_token(client.garth.dumps())
-        log.info(f"Token gespeichert: {TOKEN_FILE}")
+        save_token(user_id, client.garth.dumps())
+        log.info(f"   Token gespeichert: {_token_path(user_id)}")
     except Exception as e:
-        log.warning(f"Token-Speichern fehlgeschlagen: {e}")
+        log.warning(f"   Token-Speichern fehlgeschlagen: {e}")
     return client
 
 # ── API Helpers ──────────────────────────────────────────────────────────────
@@ -153,7 +185,6 @@ class TrailAtlasAPI:
     def __init__(self, env):
         self.base = env["API_BASE"].rstrip("/")
         self.session = requests.Session()
-        # Auth: SYNC_API_KEY Header (ersetzt Basic Auth seit v1.6.0)
         sync_key = env.get("SYNC_API_KEY", "")
         if sync_key:
             self.session.headers["X-Sync-Key"] = sync_key
@@ -163,23 +194,39 @@ class TrailAtlasAPI:
     def _url(self, path):
         return f"{self.base}{path}"
 
-    def get_existing_ids(self) -> set[str]:
-        """Liste aller bereits in der DB vorhandenen activity_ids."""
-        r = self.session.get(self._url("/activities"), timeout=30)
+    def get_sync_users(self) -> list[dict]:
+        """Alle User mit Garmin-Credentials vom Backend holen."""
+        r = self.session.get(self._url("/sync/users"), timeout=30)
+        r.raise_for_status()
+        return r.json()["users"]
+
+    def get_existing_ids(self, user_id: int) -> set[str]:
+        """Existierende activity_ids für einen bestimmten User."""
+        r = self.session.get(
+            self._url("/activities"),
+            params={"user_id": user_id},
+            timeout=30,
+        )
         r.raise_for_status()
         return {a["activity_id"] for a in r.json()}
 
-    def import_summary_csv(self, csv_text: str) -> dict:
+    def import_summary_csv(self, csv_text: str, user_id: int) -> dict:
         files = {"file": ("summary.csv", csv_text.encode("utf-8"), "text/csv")}
-        r = self.session.post(self._url("/import/summary"),
-                              files=files, timeout=120)
+        r = self.session.post(
+            self._url("/import/summary"),
+            params={"user_id": user_id},
+            files=files, timeout=120,
+        )
         r.raise_for_status()
         return r.json()
 
-    def import_gps_csv(self, csv_text: str) -> dict:
+    def import_gps_csv(self, csv_text: str, user_id: int) -> dict:
         files = {"file": ("gps.csv", csv_text.encode("utf-8"), "text/csv")}
-        r = self.session.post(self._url("/import/gps"),
-                              files=files, timeout=300)
+        r = self.session.post(
+            self._url("/import/gps"),
+            params={"user_id": user_id},
+            files=files, timeout=300,
+        )
         r.raise_for_status()
         return r.json()
 
@@ -222,11 +269,10 @@ def fetch_gps_polyline(client: Garmin, activity_id: str) -> list[tuple[float, fl
         log.warning(f"  GPS fetch failed for {activity_id}: {e}")
         return []
 
-    # Falls die API gar nichts liefert
     if not details or not isinstance(details, dict):
         return []
 
-    # Format 1: detailedMetrics – kann None oder Liste sein
+    # Format 1: detailedMetrics
     detailed = details.get("detailedMetrics") or details.get("metrics") or []
     if not isinstance(detailed, list):
         detailed = []
@@ -245,7 +291,7 @@ def fetch_gps_polyline(client: Garmin, activity_id: str) -> list[tuple[float, fl
             except (ValueError, TypeError):
                 pass
 
-    # Format 2: geoPolylineDTO – kann None sein
+    # Format 2: geoPolylineDTO
     if not points:
         geo_dto = details.get("geoPolylineDTO")
         if isinstance(geo_dto, dict):
@@ -310,26 +356,23 @@ def build_gps_csv(activity_id: str, points: list[tuple[float, float]]) -> str:
         })
     return out.getvalue()
 
-# ── Main ─────────────────────────────────────────────────────────────────────
-def main():
-    parser = argparse.ArgumentParser(
-        description="Garmin Connect → Trail Atlas API Sync",
-    )
-    parser.add_argument("--limit", type=int, default=None,
-                        help="Maximal N neue Aktivitäten syncen (für Tests)")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Zeigt was gemacht würde, ohne API-Schreibzugriff")
-    parser.add_argument("--full-resync", action="store_true",
-                        help="Auch existierende Touren neu syncen")
-    parser.add_argument("--max-pages", type=int, default=10,
-                        help="Max Garmin-Seiten zu durchsuchen (100 Aktivitäten/Seite)")
-    args = parser.parse_args()
-
+# ── Single-User Sync ────────────────────────────────────────────────────────
+def sync_user(
+    api: TrailAtlasAPI,
+    user_id: int,
+    username: str,
+    email: str,
+    password: str,
+    args,
+) -> dict:
+    """
+    Sync für einen einzelnen User durchführen.
+    Returns: sync_status dict mit Ergebnis.
+    """
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.monotonic()
 
-    # Status Tracking für Sync-Log
-    sync_status = {
+    status = {
         "status": "ok",
         "started_at": started_at,
         "finished_at": None,
@@ -340,28 +383,22 @@ def main():
         "duration_s": None,
     }
 
-    api = None
     try:
-        env = load_env()
-        api = TrailAtlasAPI(env)
-        log.info("⛰  Trail Atlas Garmin Sync")
-        log.info(f"   API: {env['API_BASE']}")
-
-        # 1. Existierende IDs aus der API holen (Inkrementell-Logik)
+        # 1. Existierende IDs für diesen User
         existing_ids: set[str] = set()
         if not args.full_resync:
             try:
-                existing_ids = api.get_existing_ids()
+                existing_ids = api.get_existing_ids(user_id)
                 log.info(f"   Bereits in DB: {len(existing_ids)} Aktivitäten")
             except Exception as e:
-                log.warning(f"   API-Liste konnte nicht geladen werden, full sync: {e}")
+                log.warning(f"   API-Liste nicht ladbar, full sync: {e}")
 
-        # 2. Garmin login
-        client = login_garmin(env)
-        log.info("   Login erfolgreich")
+        # 2. Garmin Login
+        client = login_garmin_for_user(user_id, email, password)
+        log.info(f"   Login erfolgreich")
 
         # 3. Recent activities laden
-        log.info(f"   Lade Garmin-Aktivitäten (max {args.max_pages*100})…")
+        log.info(f"   Lade Garmin-Aktivitäten (max {args.max_pages * 100})…")
         all_acts = fetch_recent_activities(client, args.max_pages)
         log.info(f"   {len(all_acts)} Garmin-Aktivitäten gefunden")
 
@@ -374,14 +411,12 @@ def main():
             log.info(f"   Auf {args.limit} begrenzt (--limit)")
 
         if not new_acts:
-            log.info("   Keine neuen Aktivitäten – fertig")
-            sync_status["finished_at"] = datetime.now(timezone.utc).isoformat()
-            sync_status["duration_s"] = round(time.monotonic() - t0, 2)
-            if not args.dry_run and api:
-                api.post_sync_log(sync_status)
-            return
+            log.info(f"   Keine neuen Aktivitäten – fertig")
+            status["finished_at"] = datetime.now(timezone.utc).isoformat()
+            status["duration_s"] = round(time.monotonic() - t0, 2)
+            return status
 
-        # 5. GPS-Punkte für jede neue Aktivität laden
+        # 5. GPS-Punkte laden
         log.info(f"   Lade GPS-Punkte für {len(new_acts)} Aktivitäten…")
         acts_with_gps: list[dict] = []
         all_gps_points: list[tuple[str, float, float]] = []
@@ -394,13 +429,13 @@ def main():
             try:
                 points = fetch_gps_polyline(client, aid)
             except Exception as e:
-                log.warning(f"      Fehler bei Aktivität {aid}: {e} – übersprungen")
-                sync_status["activities_skipped"] += 1
+                log.warning(f"      Fehler bei {aid}: {e} – übersprungen")
+                status["activities_skipped"] += 1
                 continue
 
             if not points:
                 log.info(f"      keine GPS-Punkte – übersprungen")
-                sync_status["activities_skipped"] += 1
+                status["activities_skipped"] += 1
                 continue
 
             acts_with_gps.append(act)
@@ -411,12 +446,10 @@ def main():
             time.sleep(1.0)  # Rate limiting
 
         if not acts_with_gps:
-            log.info("   Keine Aktivitäten mit GPS – fertig")
-            sync_status["finished_at"] = datetime.now(timezone.utc).isoformat()
-            sync_status["duration_s"] = round(time.monotonic() - t0, 2)
-            if not args.dry_run and api:
-                api.post_sync_log(sync_status)
-            return
+            log.info(f"   Keine Aktivitäten mit GPS – fertig")
+            status["finished_at"] = datetime.now(timezone.utc).isoformat()
+            status["duration_s"] = round(time.monotonic() - t0, 2)
+            return status
 
         # 6. CSVs bauen
         summary_csv = build_summary_csv(acts_with_gps)
@@ -425,38 +458,142 @@ def main():
             gps_lines.append(f"{aid},{lat},{lng}")
         gps_csv = "\n".join(gps_lines) + "\n"
 
-        # 7. Dry-run oder echter Upload
+        # 7. Upload (mit user_id)
         if args.dry_run:
             log.info(f"   DRY-RUN: würde {len(acts_with_gps)} Aktivitäten + "
                      f"{len(all_gps_points)} GPS-Punkte importieren")
-            sync_status["activities_imported"] = len(acts_with_gps)
-            sync_status["gps_points_imported"] = len(all_gps_points)
+            status["activities_imported"] = len(acts_with_gps)
+            status["gps_points_imported"] = len(all_gps_points)
         else:
-            log.info(f"   Posting {len(acts_with_gps)} activities to /import/summary…")
-            r1 = api.import_summary_csv(summary_csv)
+            log.info(f"   Posting {len(acts_with_gps)} activities…")
+            r1 = api.import_summary_csv(summary_csv, user_id)
             log.info(f"      → {r1}")
 
-            log.info(f"   Posting {len(all_gps_points):,} GPS points to /import/gps…")
-            r2 = api.import_gps_csv(gps_csv)
+            log.info(f"   Posting {len(all_gps_points):,} GPS points…")
+            r2 = api.import_gps_csv(gps_csv, user_id)
             log.info(f"      → {r2}")
 
-            sync_status["activities_imported"] = r1.get("imported", 0)
-            sync_status["gps_points_imported"] = r2.get("imported", 0)
+            status["activities_imported"] = r1.get("imported", 0)
+            status["gps_points_imported"] = r2.get("imported", 0)
 
     except Exception as e:
-        log.error(f"❌  Sync fehlgeschlagen: {e}", exc_info=True)
-        sync_status["status"] = "error"
-        sync_status["error_message"] = str(e)[:500]
+        log.error(f"   ❌ Sync fehlgeschlagen: {e}", exc_info=True)
+        status["status"] = "error"
+        status["error_message"] = str(e)[:500]
 
     finally:
-        sync_status["finished_at"] = datetime.now(timezone.utc).isoformat()
-        sync_status["duration_s"] = round(time.monotonic() - t0, 2)
-        if not args.dry_run and api is not None:
-            api.post_sync_log(sync_status)
-        log.info(f"✅ Done in {sync_status['duration_s']}s "
-                 f"(status: {sync_status['status']}, "
-                 f"imported: {sync_status['activities_imported']} acts, "
-                 f"{sync_status['gps_points_imported']} pts)")
+        status["finished_at"] = datetime.now(timezone.utc).isoformat()
+        status["duration_s"] = round(time.monotonic() - t0, 2)
+
+    return status
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+def main():
+    parser = argparse.ArgumentParser(
+        description="Garmin Connect → Trail Atlas API Sync (Multi-User)",
+    )
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Pro User max N neue Aktivitäten syncen")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Zeigt was gemacht würde, ohne API-Schreibzugriff")
+    parser.add_argument("--full-resync", action="store_true",
+                        help="Auch existierende Touren neu syncen")
+    parser.add_argument("--max-pages", type=int, default=10,
+                        help="Max Garmin-Seiten pro User (100 Aktivitäten/Seite)")
+    parser.add_argument("--user", type=int, default=None,
+                        help="Nur einen bestimmten User syncen (user_id)")
+    args = parser.parse_args()
+
+    global_t0 = time.monotonic()
+    env = load_env()
+
+    # SECRET_KEY für Fernet-Entschlüsselung
+    secret_key = env.get("SECRET_KEY", "")
+    if not secret_key:
+        log.error("SECRET_KEY fehlt in garmin.env – kann Credentials nicht entschlüsseln")
+        sys.exit(1)
+    fernet = _init_fernet(secret_key)
+
+    api = TrailAtlasAPI(env)
+    log.info("⛰  Trail Atlas Garmin Sync (Multi-User)")
+    log.info(f"   API: {env['API_BASE']}")
+
+    # 1. User-Liste vom Backend holen
+    try:
+        sync_users = api.get_sync_users()
+    except Exception as e:
+        log.error(f"❌ Konnte User-Liste nicht laden: {e}")
+        sys.exit(1)
+
+    if not sync_users:
+        log.info("   Keine User mit Garmin-Credentials – nichts zu tun")
+        return
+
+    # Optional: nur einen bestimmten User
+    if args.user is not None:
+        sync_users = [u for u in sync_users if u["user_id"] == args.user]
+        if not sync_users:
+            log.error(f"   User {args.user} hat keine Garmin-Credentials")
+            sys.exit(1)
+
+    log.info(f"   {len(sync_users)} User zu syncen: "
+             f"{', '.join(u['username'] for u in sync_users)}")
+
+    # 2. Pro User syncen
+    total_imported = 0
+    total_gps = 0
+    errors = 0
+
+    for u in sync_users:
+        user_id = u["user_id"]
+        username = u["username"]
+
+        log.info(f"\n{'─'*50}")
+        log.info(f"   User: {username} (id={user_id})")
+        log.info(f"{'─'*50}")
+
+        # Credentials entschlüsseln
+        try:
+            creds = decrypt_credentials(fernet, u["encrypted_credentials"])
+        except Exception as e:
+            log.error(f"   ❌ Credentials nicht entschlüsselbar: {e}")
+            errors += 1
+            continue
+
+        # Sync durchführen
+        status = sync_user(
+            api=api,
+            user_id=user_id,
+            username=username,
+            email=creds["email"],
+            password=creds["password"],
+            args=args,
+        )
+
+        # Sync-Log posten
+        if not args.dry_run:
+            api.post_sync_log(status)
+
+        total_imported += status["activities_imported"]
+        total_gps += status["gps_points_imported"]
+        if status["status"] == "error":
+            errors += 1
+
+        log.info(f"   → {status['status']}: "
+                 f"{status['activities_imported']} acts, "
+                 f"{status['gps_points_imported']} pts "
+                 f"({status['duration_s']}s)")
+
+    # 3. Zusammenfassung
+    elapsed = round(time.monotonic() - global_t0, 2)
+    log.info(f"\n{'═'*50}")
+    log.info(f"✅ Sync abgeschlossen in {elapsed}s")
+    log.info(f"   {len(sync_users)} User, {total_imported} Aktivitäten, {total_gps} GPS-Punkte")
+    if errors:
+        log.warning(f"   ⚠ {errors} User mit Fehlern")
+    log.info(f"{'═'*50}")
+
 
 if __name__ == "__main__":
     main()

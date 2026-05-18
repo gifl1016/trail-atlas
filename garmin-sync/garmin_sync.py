@@ -11,15 +11,21 @@ Verwendung:
     python3 garmin_sync.py --dry-run          # zeigt was gemacht würde
     python3 garmin_sync.py --full-resync      # auch existierende Touren
     python3 garmin_sync.py --user 2           # nur User mit ID 2 syncen
+    python3 garmin_sync.py --skip-gps         # nur Metadaten, kein GPS-Fetch
 
 Konfiguration: /etc/trail-atlas/garmin.env
     → API_BASE, SYNC_API_KEY, SECRET_KEY (für Credential-Entschlüsselung)
 
-Ablauf:
-    1. GET /sync/users → Liste aller User mit verschlüsselten Garmin-Credentials
-    2. Für jeden User: Credentials entschlüsseln → Garmin Login → Aktivitäten laden
-    3. POST /import/summary?user_id=X + /import/gps?user_id=X
-    4. POST /sync/log (Statistik)
+Ablauf pro User:
+    1. GET /sync/users → Liste aller User mit verschlüsselten Credentials
+    2. Garmin Login → Aktivitätsliste laden (paginiert)
+    3. POST /import/summary?user_id=X (ALLE neuen Activities, auch ohne GPS)
+    4. Pro Activity: GPS-Punkte laden (best-effort)
+    5. POST /import/gps?user_id=X (GPS-Punkte, falls vorhanden)
+    6. POST /sync/log (Statistik)
+
+GPS-Fetch ist best-effort: Activities ohne GPS-Track (Indoor, Yoga) oder mit
+GPS-Fehlern bleiben trotzdem in der DB (nur ohne Track auf der Karte).
 """
 
 import argparse
@@ -220,6 +226,16 @@ class TrailAtlasAPI:
         r.raise_for_status()
         return r.json()
 
+    def import_gps_csv(self, csv_text: str, user_id: int) -> dict:
+        files = {"file": ("gps.csv", csv_text.encode("utf-8"), "text/csv")}
+        r = self.session.post(
+            self._url("/import/gps"),
+            params={"user_id": user_id},
+            files=files, timeout=300,
+        )
+        r.raise_for_status()
+        return r.json()
+
     def post_sync_log(self, entry: dict):
         try:
             r = self.session.post(self._url("/sync/log"),
@@ -285,6 +301,57 @@ def build_summary_csv(activities: list[dict]) -> str:
         })
     return out.getvalue()
 
+def fetch_gps_polyline(client: Garmin, activity_id: str) -> list[tuple[float, float]]:
+    """GPS-Punkte für eine Aktivität laden, in zwei API-Formaten.
+    Robust gegen fehlende oder None-Werte in der Garmin-API-Antwort.
+    Returns [] wenn keine GPS-Punkte vorhanden (z.B. Indoor-Aktivität)."""
+    points: list[tuple[float, float]] = []
+    try:
+        details = client.get_activity_details(activity_id)
+    except Exception as e:
+        log.warning(f"      GPS fetch failed for {activity_id}: {e}")
+        return []
+
+    if not details or not isinstance(details, dict):
+        return []
+
+    # Format 1: detailedMetrics (häufig bei neuen Activities)
+    detailed = details.get("detailedMetrics") or details.get("metrics") or []
+    if not isinstance(detailed, list):
+        detailed = []
+
+    for m in detailed:
+        if not isinstance(m, dict):
+            continue
+        metrics = m.get("metrics") or {}
+        if not isinstance(metrics, dict):
+            metrics = {}
+        lat = metrics.get("directLatitude") or m.get("lat")
+        lng = metrics.get("directLongitude") or m.get("lon")
+        if lat is not None and lng is not None:
+            try:
+                points.append((float(lat), float(lng)))
+            except (ValueError, TypeError):
+                pass
+
+    # Format 2: geoPolylineDTO (Fallback)
+    if not points:
+        geo_dto = details.get("geoPolylineDTO")
+        if isinstance(geo_dto, dict):
+            polyline = geo_dto.get("polyline") or []
+            if isinstance(polyline, list):
+                for pt in polyline:
+                    if not isinstance(pt, dict):
+                        continue
+                    if pt.get("lat") is not None and pt.get("lon") is not None:
+                        try:
+                            points.append((float(pt["lat"]), float(pt["lon"])))
+                        except (ValueError, TypeError):
+                            pass
+
+    return points
+
+
 # ── Single-User Sync ────────────────────────────────────────────────────────
 def sync_user(
     api: TrailAtlasAPI,
@@ -295,9 +362,9 @@ def sync_user(
     args,
 ) -> dict:
     """
-    Sync für einen einzelnen User durchführen.
-    Importiert nur Aktivitäts-Metadaten (kein GPS-Fetch → drastisch schneller).
-    Returns: sync_status dict mit Ergebnis.
+    Sync für einen einzelnen User:
+    1. Aktivitäts-Metadaten importieren (alle, auch ohne GPS)
+    2. GPS-Punkte als best-effort fetchen (Fehler verlieren die Activity nicht)
     """
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.monotonic()
@@ -346,18 +413,76 @@ def sync_user(
             status["duration_s"] = round(time.monotonic() - t0, 2)
             return status
 
-        # 5. Summary-CSV bauen und hochladen (kein GPS-Fetch nötig!)
+        # 5. SCHRITT A: Summary-CSV importieren (ALLE Activities)
         summary_csv = build_summary_csv(new_acts)
 
         if args.dry_run:
             log.info(f"   DRY-RUN: würde {len(new_acts)} Aktivitäten importieren")
             status["activities_imported"] = len(new_acts)
         else:
-            log.info(f"   Posting {len(new_acts)} activities…")
+            log.info(f"   [1/2] Importiere {len(new_acts)} Activity-Metadaten…")
             r1 = api.import_summary_csv(summary_csv, user_id)
-            log.info(f"      → {r1}")
+            log.info(f"        → {r1}")
             status["activities_imported"] = r1.get("imported", 0)
             status["activities_skipped"] = r1.get("skipped", 0)
+
+        # 6. SCHRITT B: GPS-Punkte als best-effort fetchen
+        # Activities bleiben in der DB auch wenn der GPS-Fetch fehlschlägt
+        # (z.B. Rate-Limit, fehlende Punkte, Indoor-Activity).
+        if args.skip_gps:
+            log.info(f"   GPS-Fetch übersprungen (--skip-gps)")
+        else:
+            log.info(f"   [2/2] Lade GPS-Punkte für {len(new_acts)} Activities…")
+            all_gps_points: list[tuple[str, float, float]] = []
+            gps_success_count = 0
+            gps_no_data_count = 0
+            gps_error_count = 0
+
+            for i, act in enumerate(new_acts, 1):
+                aid = str(act.get("activityId", ""))
+                name = (act.get("activityName") or aid)[:40]
+
+                try:
+                    points = fetch_gps_polyline(client, aid)
+                except Exception as e:
+                    log.warning(f"   [{i:>3}/{len(new_acts)}] {name}: GPS-Fetch-Fehler ({e})")
+                    gps_error_count += 1
+                    continue
+
+                if not points:
+                    log.info(f"   [{i:>3}/{len(new_acts)}] {name}: keine GPS-Punkte")
+                    gps_no_data_count += 1
+                    continue
+
+                for lat, lng in points:
+                    all_gps_points.append((aid, lat, lng))
+                log.info(f"   [{i:>3}/{len(new_acts)}] {name}: {len(points)} Punkte")
+                gps_success_count += 1
+                time.sleep(1.0)  # Rate limiting
+
+            log.info(f"   GPS-Fetch: {gps_success_count} mit Track, "
+                     f"{gps_no_data_count} ohne Track, "
+                     f"{gps_error_count} Fehler")
+
+            # GPS-CSV hochladen falls Punkte vorhanden
+            if all_gps_points:
+                gps_lines = ["activity_id,latitude,longitude"]
+                for aid, lat, lng in all_gps_points:
+                    gps_lines.append(f"{aid},{lat},{lng}")
+                gps_csv = "\n".join(gps_lines) + "\n"
+
+                if args.dry_run:
+                    log.info(f"   DRY-RUN: würde {len(all_gps_points)} GPS-Punkte importieren")
+                    status["gps_points_imported"] = len(all_gps_points)
+                else:
+                    log.info(f"   Posting {len(all_gps_points):,} GPS-Punkte…")
+                    try:
+                        r2 = api.import_gps_csv(gps_csv, user_id)
+                        log.info(f"        → {r2}")
+                        status["gps_points_imported"] = r2.get("imported", 0)
+                    except Exception as e:
+                        log.error(f"   GPS-Upload fehlgeschlagen: {e}")
+                        # Activities bleiben trotzdem in DB
 
     except Exception as e:
         log.error(f"   ❌ Sync fehlgeschlagen: {e}", exc_info=True)
@@ -386,6 +511,8 @@ def main():
                         help="Max Garmin-Seiten pro User (100 Aktivitäten/Seite)")
     parser.add_argument("--user", type=int, default=None,
                         help="Nur einen bestimmten User syncen (user_id)")
+    parser.add_argument("--skip-gps", action="store_true",
+                        help="GPS-Fetch überspringen (nur Metadaten – schnell)")
     args = parser.parse_args()
 
     global_t0 = time.monotonic()

@@ -2,7 +2,7 @@
 """
 garmin_sync.py – Multi-User Garmin Sync
 ========================================
-Läd Aktivitäten von Garmin Connect für ALLE User mit Garmin-Credentials
+Läd Aktivitäten  von Garmin Connect für ALLE User mit Garmin-Credentials
 und postet sie an die Trail Atlas API (mit user_id-Parameter).
 
 Verwendung:

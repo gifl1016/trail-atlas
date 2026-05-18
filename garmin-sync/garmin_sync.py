@@ -2,7 +2,7 @@
 """
 garmin_sync.py – Multi-User Garmin Sync
 ========================================
-Läd Aktivitäten  von Garmin Connect für ALLE User mit Garmin-Credentials
+Läd Aktivitäten von Garmin Connect für ALLE User mit Garmin-Credentials
 und postet sie an die Trail Atlas API (mit user_id-Parameter).
 
 Verwendung:
@@ -220,16 +220,6 @@ class TrailAtlasAPI:
         r.raise_for_status()
         return r.json()
 
-    def import_gps_csv(self, csv_text: str, user_id: int) -> dict:
-        files = {"file": ("gps.csv", csv_text.encode("utf-8"), "text/csv")}
-        r = self.session.post(
-            self._url("/import/gps"),
-            params={"user_id": user_id},
-            files=files, timeout=300,
-        )
-        r.raise_for_status()
-        return r.json()
-
     def post_sync_log(self, entry: dict):
         try:
             r = self.session.post(self._url("/sync/log"),
@@ -258,55 +248,6 @@ def fetch_recent_activities(client: Garmin, max_pages: int = 10) -> list[dict]:
             break
         time.sleep(1.0)  # rate limiting
     return all_acts
-
-def fetch_gps_polyline(client: Garmin, activity_id: str) -> list[tuple[float, float]]:
-    """GPS-Punkte für eine Aktivität laden, in zwei API-Formaten.
-    Robust gegen fehlende oder None-Werte in der Garmin-API-Antwort."""
-    points: list[tuple[float, float]] = []
-    try:
-        details = client.get_activity_details(activity_id)
-    except Exception as e:
-        log.warning(f"  GPS fetch failed for {activity_id}: {e}")
-        return []
-
-    if not details or not isinstance(details, dict):
-        return []
-
-    # Format 1: detailedMetrics
-    detailed = details.get("detailedMetrics") or details.get("metrics") or []
-    if not isinstance(detailed, list):
-        detailed = []
-
-    for m in detailed:
-        if not isinstance(m, dict):
-            continue
-        metrics = m.get("metrics") or {}
-        if not isinstance(metrics, dict):
-            metrics = {}
-        lat = metrics.get("directLatitude") or m.get("lat")
-        lng = metrics.get("directLongitude") or m.get("lon")
-        if lat is not None and lng is not None:
-            try:
-                points.append((float(lat), float(lng)))
-            except (ValueError, TypeError):
-                pass
-
-    # Format 2: geoPolylineDTO
-    if not points:
-        geo_dto = details.get("geoPolylineDTO")
-        if isinstance(geo_dto, dict):
-            polyline = geo_dto.get("polyline") or []
-            if isinstance(polyline, list):
-                for pt in polyline:
-                    if not isinstance(pt, dict):
-                        continue
-                    if pt.get("lat") is not None and pt.get("lon") is not None:
-                        try:
-                            points.append((float(pt["lat"]), float(pt["lon"])))
-                        except (ValueError, TypeError):
-                            pass
-
-    return points
 
 # ── CSV Builder ──────────────────────────────────────────────────────────────
 def build_summary_csv(activities: list[dict]) -> str:
@@ -344,18 +285,6 @@ def build_summary_csv(activities: list[dict]) -> str:
         })
     return out.getvalue()
 
-def build_gps_csv(activity_id: str, points: list[tuple[float, float]]) -> str:
-    out = io.StringIO()
-    writer = csv.DictWriter(out, fieldnames=["activity_id", "latitude", "longitude"])
-    writer.writeheader()
-    for lat, lng in points:
-        writer.writerow({
-            "activity_id": activity_id,
-            "latitude": lat,
-            "longitude": lng,
-        })
-    return out.getvalue()
-
 # ── Single-User Sync ────────────────────────────────────────────────────────
 def sync_user(
     api: TrailAtlasAPI,
@@ -367,6 +296,7 @@ def sync_user(
 ) -> dict:
     """
     Sync für einen einzelnen User durchführen.
+    Importiert nur Aktivitäts-Metadaten (kein GPS-Fetch → drastisch schneller).
     Returns: sync_status dict mit Ergebnis.
     """
     started_at = datetime.now(timezone.utc).isoformat()
@@ -416,65 +346,18 @@ def sync_user(
             status["duration_s"] = round(time.monotonic() - t0, 2)
             return status
 
-        # 5. GPS-Punkte laden
-        log.info(f"   Lade GPS-Punkte für {len(new_acts)} Aktivitäten…")
-        acts_with_gps: list[dict] = []
-        all_gps_points: list[tuple[str, float, float]] = []
+        # 5. Summary-CSV bauen und hochladen (kein GPS-Fetch nötig!)
+        summary_csv = build_summary_csv(new_acts)
 
-        for i, act in enumerate(new_acts, 1):
-            aid = str(act.get("activityId", ""))
-            name = act.get("activityName", aid)[:40]
-            log.info(f"   [{i:>3}/{len(new_acts)}] {name}")
-
-            try:
-                points = fetch_gps_polyline(client, aid)
-            except Exception as e:
-                log.warning(f"      Fehler bei {aid}: {e} – übersprungen")
-                status["activities_skipped"] += 1
-                continue
-
-            if not points:
-                log.info(f"      keine GPS-Punkte – übersprungen")
-                status["activities_skipped"] += 1
-                continue
-
-            acts_with_gps.append(act)
-            for lat, lng in points:
-                all_gps_points.append((aid, lat, lng))
-
-            log.info(f"      {len(points)} GPS-Punkte")
-            time.sleep(1.0)  # Rate limiting
-
-        if not acts_with_gps:
-            log.info(f"   Keine Aktivitäten mit GPS – fertig")
-            status["finished_at"] = datetime.now(timezone.utc).isoformat()
-            status["duration_s"] = round(time.monotonic() - t0, 2)
-            return status
-
-        # 6. CSVs bauen
-        summary_csv = build_summary_csv(acts_with_gps)
-        gps_lines = ["activity_id,latitude,longitude"]
-        for aid, lat, lng in all_gps_points:
-            gps_lines.append(f"{aid},{lat},{lng}")
-        gps_csv = "\n".join(gps_lines) + "\n"
-
-        # 7. Upload (mit user_id)
         if args.dry_run:
-            log.info(f"   DRY-RUN: würde {len(acts_with_gps)} Aktivitäten + "
-                     f"{len(all_gps_points)} GPS-Punkte importieren")
-            status["activities_imported"] = len(acts_with_gps)
-            status["gps_points_imported"] = len(all_gps_points)
+            log.info(f"   DRY-RUN: würde {len(new_acts)} Aktivitäten importieren")
+            status["activities_imported"] = len(new_acts)
         else:
-            log.info(f"   Posting {len(acts_with_gps)} activities…")
+            log.info(f"   Posting {len(new_acts)} activities…")
             r1 = api.import_summary_csv(summary_csv, user_id)
             log.info(f"      → {r1}")
-
-            log.info(f"   Posting {len(all_gps_points):,} GPS points…")
-            r2 = api.import_gps_csv(gps_csv, user_id)
-            log.info(f"      → {r2}")
-
             status["activities_imported"] = r1.get("imported", 0)
-            status["gps_points_imported"] = r2.get("imported", 0)
+            status["activities_skipped"] = r1.get("skipped", 0)
 
     except Exception as e:
         log.error(f"   ❌ Sync fehlgeschlagen: {e}", exc_info=True)

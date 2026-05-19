@@ -43,6 +43,7 @@ from auth import (
     get_user_by_id, create_user, ensure_admin_exists,
     create_invite_code, validate_invite_code, redeem_invite_code,
     save_garmin_credentials, get_all_garmin_users, has_garmin_credentials,
+    list_all_users, delete_user, remove_garmin_credentials,
     SESSION_MAX_AGE,
 )
 
@@ -171,6 +172,18 @@ def _resolve_user_id(user: dict | None, request: Request) -> int | None:
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="user_id muss eine Zahl sein")
     return None
+
+
+def _require_admin(user: dict | None = Depends(get_current_user)) -> dict:
+    """
+    Dependency die nur Admin-User durchlässt.
+    Nicht-Admin → 403. Sync-Key (user=None) → 403 (Admin-Endpoints sind Session-only).
+    """
+    if user is None:
+        raise HTTPException(status_code=403, detail="Admin-Zugriff erforderlich")
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin-Zugriff erforderlich")
+    return user
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -674,18 +687,44 @@ class SyncLogEntry(BaseModel):
     activities_skipped:   int            = 0
     error_message:        Optional[str]  = None
     duration_s:           Optional[float] = None
+    user_id:              Optional[int]  = None
 
 
 @app.get("/sync/status")
-def get_sync_status(limit: int = 10, user: dict | None = Depends(get_current_user)):
+def get_sync_status(
+    request: Request,
+    limit: int = 10,
+    user: dict | None = Depends(get_current_user),
+):
     """
     Letzte N Sync-Läufe zurückgeben (default 10).
-    Wird vom Frontend angezeigt damit der User sieht ob der Cronjob durchläuft.
+
+    Filterung:
+    - Eingeloggter User → nur seine eigenen Sync-Logs
+    - Admin mit ?user_id=X → Sync-Logs eines bestimmten Users (für Admin-Tab)
+    - Sync-Key → alle Logs (kein Filter)
     """
-    rows = db.query(
-        "SELECT * FROM sync_log ORDER BY id DESC LIMIT ?",
-        (limit,)
-    )
+    # Admin darf via Query-Parameter andere User abfragen
+    target_uid = None
+    if user is not None:
+        if user.get("is_admin") and request.query_params.get("user_id"):
+            try:
+                target_uid = int(request.query_params["user_id"])
+            except (ValueError, TypeError):
+                raise HTTPException(status_code=400, detail="user_id muss eine Zahl sein")
+        else:
+            target_uid = user["id"]
+
+    if target_uid is not None:
+        rows = db.query(
+            "SELECT * FROM sync_log WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (target_uid, limit)
+        )
+    else:
+        rows = db.query(
+            "SELECT * FROM sync_log ORDER BY id DESC LIMIT ?",
+            (limit,)
+        )
     entries = [dict(r) for r in rows]
     last_ok = next((e for e in entries if e["status"] == "ok"), None)
     last_err = next((e for e in entries if e["status"] == "error"), None)
@@ -704,8 +743,8 @@ def post_sync_log(entry: SyncLogEntry):
     db.execute(
         """INSERT INTO sync_log
            (status, started_at, finished_at, activities_imported,
-            gps_points_imported, activities_skipped, error_message, duration_s)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            gps_points_imported, activities_skipped, error_message, duration_s, user_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             entry.status,
             entry.started_at,
@@ -715,9 +754,11 @@ def post_sync_log(entry: SyncLogEntry):
             entry.activities_skipped,
             entry.error_message,
             entry.duration_s,
+            entry.user_id,
         )
     )
-    log.info(f"Sync log: {entry.status} ({entry.activities_imported} acts, {entry.gps_points_imported} pts)")
+    log.info(f"Sync log: {entry.status} user={entry.user_id} "
+             f"({entry.activities_imported} acts, {entry.gps_points_imported} pts)")
     return {"status": "logged"}
 
 
@@ -749,3 +790,82 @@ def get_sync_users(request: Request, user: dict | None = Depends(get_current_use
             "encrypted_credentials": r["token_json"],
         })
     return {"users": users}
+
+# ── Admin: Nutzerverwaltung ───────────────────────────────────────────────────
+
+class GarminCredsRequest(BaseModel):
+    email:    str = Field(..., min_length=3)
+    password: str = Field(..., min_length=1)
+
+
+@app.get("/admin/users")
+def admin_list_users(admin: dict = Depends(_require_admin)):
+    """
+    Alle User mit Stats: Aktivitäten, GPS-Punkte, Garmin-Status, letzter Sync.
+    Nur für Admin-User.
+    """
+    return {"users": list_all_users(db)}
+
+
+@app.delete("/admin/users/{user_id}")
+def admin_delete_user(user_id: int, admin: dict = Depends(_require_admin)):
+    """
+    Löscht einen User komplett (User + Activities + GPS + Credentials + Sync-Log).
+    Admin darf sich selbst nicht löschen (sonst keine Admin-Zugriffe mehr möglich).
+    """
+    if user_id == admin["id"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Du kannst dich nicht selbst löschen"
+        )
+
+    target = get_user_by_id(db, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User nicht gefunden")
+
+    # Letzten verbleibenden Admin schützen
+    if target.get("is_admin"):
+        admin_count = db.query("SELECT COUNT(*) as n FROM users WHERE is_admin = 1")[0]["n"]
+        if admin_count <= 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Letzter Admin kann nicht gelöscht werden"
+            )
+
+    delete_user(db, user_id)
+    return {"status": "deleted", "user_id": user_id, "username": target["username"]}
+
+
+@app.post("/admin/users/{user_id}/garmin")
+def admin_set_garmin_credentials(
+    user_id: int,
+    body: GarminCredsRequest,
+    admin: dict = Depends(_require_admin),
+):
+    """
+    Setzt oder ersetzt Garmin-Credentials für einen User.
+    Nützlich um User nachträglich mit Garmin zu verknüpfen.
+    """
+    target = get_user_by_id(db, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User nicht gefunden")
+
+    save_garmin_credentials(db, user_id, body.email, body.password)
+    return {"status": "ok", "user_id": user_id, "has_garmin": True}
+
+
+@app.delete("/admin/users/{user_id}/garmin")
+def admin_remove_garmin_credentials(
+    user_id: int,
+    admin: dict = Depends(_require_admin),
+):
+    """
+    Entfernt Garmin-Verknüpfung eines Users (aber User bleibt bestehen).
+    Auto-Sync für diesen User stoppt damit. Activities bleiben in der DB.
+    """
+    target = get_user_by_id(db, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User nicht gefunden")
+
+    removed = remove_garmin_credentials(db, user_id)
+    return {"status": "removed" if removed else "noop", "user_id": user_id}

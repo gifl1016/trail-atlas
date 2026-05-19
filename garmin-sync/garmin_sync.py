@@ -378,6 +378,7 @@ def sync_user(
         "activities_skipped": 0,
         "error_message": None,
         "duration_s": None,
+        "user_id": user_id,
     }
 
     try:

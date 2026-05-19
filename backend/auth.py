@@ -283,6 +283,82 @@ def has_garmin_credentials(db: Database, user_id: int) -> bool:
     return len(rows) > 0
 
 
+def remove_garmin_credentials(db: Database, user_id: int) -> bool:
+    """Entfernt Garmin-Credentials eines Users. Returns True wenn gelöscht."""
+    rows = db.query(
+        "SELECT 1 FROM garmin_credentials WHERE user_id = ?", (user_id,)
+    )
+    if not rows:
+        return False
+    db.execute("DELETE FROM garmin_credentials WHERE user_id = ?", (user_id,))
+    log.info(f"Garmin credentials removed for user_id={user_id}")
+    return True
+
+
+def list_all_users(db: Database) -> list[dict]:
+    """
+    Alle User mit Statistiken: Aktivitäten-Count, GPS-Punkte, Garmin-Status,
+    letzter Sync-Status. Für die Admin-Nutzerverwaltung.
+    """
+    users = db.query(
+        """
+        SELECT
+            u.id, u.username, u.is_admin, u.created_at,
+            EXISTS(SELECT 1 FROM garmin_credentials gc WHERE gc.user_id = u.id) AS has_garmin,
+            (SELECT COUNT(*) FROM activities a WHERE a.user_id = u.id) AS activity_count,
+            (SELECT COUNT(*) FROM gps_points g
+                JOIN activities a ON g.activity_id = a.activity_id
+                WHERE a.user_id = u.id) AS gps_point_count
+        FROM users u
+        ORDER BY u.created_at ASC
+        """
+    )
+    result = []
+    for u in users:
+        # Letzten Sync (egal welcher Status) für diesen User holen
+        last_sync = db.query(
+            "SELECT status, started_at, finished_at, "
+            "activities_imported, gps_points_imported, error_message, duration_s "
+            "FROM sync_log WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+            (u["id"],)
+        )
+        result.append({
+            "id":              u["id"],
+            "username":        u["username"],
+            "is_admin":        bool(u["is_admin"]),
+            "created_at":      u["created_at"],
+            "has_garmin":      bool(u["has_garmin"]),
+            "activity_count":  u["activity_count"],
+            "gps_point_count": u["gps_point_count"],
+            "last_sync":       dict(last_sync[0]) if last_sync else None,
+        })
+    return result
+
+
+def delete_user(db: Database, user_id: int):
+    """
+    Löscht einen User und alle seine Daten.
+
+    Reihenfolge wichtig wegen Foreign Keys:
+      1. GPS-Punkte der User-Activities
+      2. Activities des Users
+      3. Garmin-Credentials (CASCADE, aber explizit ist klarer)
+      4. sync_log-Einträge (FK SET NULL würde sie behalten – wir wollen löschen)
+      5. Invite-Codes die der User erstellt hat (created_by → NULL via FK)
+      6. User selbst
+    """
+    db.execute(
+        "DELETE FROM gps_points WHERE activity_id IN "
+        "(SELECT activity_id FROM activities WHERE user_id = ?)",
+        (user_id,)
+    )
+    db.execute("DELETE FROM activities WHERE user_id = ?", (user_id,))
+    db.execute("DELETE FROM garmin_credentials WHERE user_id = ?", (user_id,))
+    db.execute("DELETE FROM sync_log WHERE user_id = ?", (user_id,))
+    db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    log.info(f"User deleted: id={user_id}")
+
+
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 def ensure_admin_exists(db: Database):

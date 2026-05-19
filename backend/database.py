@@ -84,6 +84,7 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS sync_log (
                     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id              INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     status               TEXT    NOT NULL,
                     started_at           TEXT    NOT NULL,
                     finished_at          TEXT,
@@ -96,6 +97,9 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_sync_log_started
                     ON sync_log (started_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_sync_log_user
+                    ON sync_log (user_id, started_at DESC);
 
                 COMMIT;
             """)
@@ -155,6 +159,9 @@ class Database:
         # ── Migration: start_lat/start_lng nullable machen (Schema v3) ────
         self._migrate_nullable_coords()
 
+        # ── Migration: sync_log.user_id nachträglich hinzufügen ────────────
+        self._migrate_sync_log_user_id()
+
         log.info("Database initialized (schema v3)")
 
     def _migrate_activities_user_id(self):
@@ -186,6 +193,26 @@ class Database:
             log.info("Migration: activities.user_id + index added (existing rows → NULL)")
         else:
             log.debug("Migration: activities.user_id already present, skipping")
+
+    def _migrate_sync_log_user_id(self):
+        """Fügt sync_log.user_id hinzu für Per-User Sync-Status."""
+        cols = {
+            row[1] for row in
+            self._conn.execute("PRAGMA table_info(sync_log)").fetchall()
+        }
+        if "user_id" not in cols:
+            with self._lock:
+                self._conn.execute(
+                    "ALTER TABLE sync_log ADD COLUMN user_id INTEGER "
+                    "REFERENCES users(id) ON DELETE SET NULL"
+                )
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_sync_log_user "
+                    "ON sync_log (user_id, started_at DESC)"
+                )
+            log.info("Migration: sync_log.user_id + index added")
+        else:
+            log.debug("Migration: sync_log.user_id already present, skipping")
 
     def _migrate_nullable_coords(self):
         """

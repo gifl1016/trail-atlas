@@ -201,6 +201,45 @@
   .ir-good{color:#00e5ff}
   .ir-warn{color:#ffd740}
 
+  /* ── ADMIN PANEL ── */
+  .admin-header{padding:18px 16px 8px;font-size:13px;color:#888;letter-spacing:1px}
+  .admin-list{padding:0 12px 80px;display:flex;flex-direction:column;gap:10px}
+  .user-card{background:#131313;border:1px solid #1f1f1f;border-radius:12px;padding:14px}
+  .user-card.admin-card{border-color:#00e5ff20}
+  .user-card-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+  .user-name{font-size:15px;font-weight:600;color:#e8e8e0;display:flex;align-items:center;gap:8px}
+  .user-badge{font-size:9px;letter-spacing:1px;padding:2px 7px;border-radius:5px;text-transform:uppercase}
+  .user-badge.admin{background:#00e5ff15;color:#00e5ff;border:1px solid #00e5ff30}
+  .user-badge.garmin-yes{background:#7ee78715;color:#7ee787;border:1px solid #7ee78730}
+  .user-badge.garmin-no{background:#55555515;color:#666;border:1px solid #55555530}
+  .user-stats{display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;font-size:11px;color:#888;margin-bottom:8px}
+  .user-stat-val{color:#aaa;font-weight:500}
+  .user-sync-row{font-size:11px;color:#666;padding-top:8px;border-top:1px solid #1c1c1c}
+  .user-sync-row .sync-ok{color:#7ee787}
+  .user-sync-row .sync-err{color:#ff8080}
+  .user-actions{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
+  .user-action-btn{flex:1;min-width:80px;padding:8px 10px;background:#0e0e0e;border:1px solid #252525;border-radius:8px;color:#aaa;font-size:11px;cursor:pointer;font-family:inherit;transition:background .15s}
+  .user-action-btn:hover{background:#181818;color:#e8e8e0}
+  .user-action-btn.danger{color:#ff808099;border-color:#ff808022}
+  .user-action-btn.danger:hover{background:#3a1414;color:#ff8080}
+  .user-action-btn:disabled{opacity:.4;cursor:not-allowed}
+  .admin-refresh{margin:8px 16px 4px;padding:8px 14px;background:transparent;border:1px solid #252525;border-radius:8px;color:#666;font-size:11px;cursor:pointer;font-family:inherit}
+  .admin-refresh:hover{color:#00e5ff;border-color:#00e5ff33}
+  .admin-empty{text-align:center;color:#444;font-size:12px;padding:40px 16px}
+
+  /* ── GARMIN CREDS MODAL ── */
+  #garmin-modal{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;align-items:center;justify-content:center;z-index:9999;padding:24px}
+  #garmin-modal.show{display:flex}
+  .garmin-modal-box{background:#0d0d0d;border:1px solid #252525;border-radius:14px;padding:20px;max-width:340px;width:100%}
+  .garmin-modal-title{font-size:14px;font-weight:600;color:#e8e8e0;margin:0 0 4px;letter-spacing:.5px}
+  .garmin-modal-sub{font-size:11px;color:#666;margin:0 0 14px}
+  .garmin-modal-err{font-size:11px;color:#ff8080;min-height:14px;margin:2px 0 8px}
+  .garmin-modal-btns{display:flex;gap:8px;margin-top:6px}
+  .garmin-modal-btns button{flex:1;padding:11px;border-radius:9px;font-size:13px;font-family:inherit;cursor:pointer;border:1px solid #252525}
+  .garmin-modal-cancel{background:#0e0e0e;color:#888}
+  .garmin-modal-save{background:#00e5ff12;color:#00e5ff;border-color:#00e5ff33}
+  .garmin-modal-save:active{background:#00e5ff22}
+
   /* ── LOGIN SCREEN ── */
   #login-screen{position:absolute;inset:0;background:#0d0d0d;z-index:10000;display:flex;align-items:center;justify-content:center}
   #login-screen.hidden{display:none}
@@ -452,6 +491,32 @@
     </div>
   </div>
 
+  <!-- PANEL: ADMIN (nur für Admins, dynamisch eingeblendet) -->
+  <div id="panel-admin" class="panel">
+    <div class="panel-header">
+      <span class="panel-title">Nutzerverwaltung</span>
+    </div>
+    <button class="admin-refresh" onclick="loadAdminUsers()">↻ Aktualisieren</button>
+    <div id="admin-users-list" class="admin-list">
+      <p class="admin-empty">Wird geladen…</p>
+    </div>
+  </div>
+
+  <!-- GARMIN CREDS MODAL -->
+  <div id="garmin-modal">
+    <div class="garmin-modal-box">
+      <p class="garmin-modal-title" id="garmin-modal-title">Garmin verknüpfen</p>
+      <p class="garmin-modal-sub" id="garmin-modal-sub">Für User: …</p>
+      <input class="login-input" id="garmin-modal-email" type="email" placeholder="Garmin Email" autocomplete="off">
+      <input class="login-input" id="garmin-modal-pass" type="password" placeholder="Garmin Passwort" autocomplete="new-password">
+      <p class="garmin-modal-err" id="garmin-modal-err"></p>
+      <div class="garmin-modal-btns">
+        <button class="garmin-modal-cancel" onclick="closeGarminModal()">Abbrechen</button>
+        <button class="garmin-modal-save" id="garmin-modal-save-btn" onclick="saveGarminCreds()">Speichern</button>
+      </div>
+    </div>
+  </div>
+
   <!-- DETAIL SHEET -->
   <div id="overlay">
     <div class="sheet" id="sheet"></div>
@@ -479,6 +544,9 @@
     </button>
     <button class="nav-btn" onclick="switchTab('import')">
       <span class="nav-icon">↑</span><span class="nav-label">Import</span>
+    </button>
+    <button class="nav-btn admin-only" id="nav-admin-btn" onclick="switchTab('admin')" style="display:none">
+      <span class="nav-icon">⚙</span><span class="nav-label">Admin</span>
     </button>
   </nav>
 
@@ -1215,11 +1283,14 @@ function showOnMap(id) {
 // ── TAB SWITCH ────────────────────────────────────────────────────────────────
 function switchTab(tab) {
   currentTab = tab;
+  // Update nav buttons (admin button is the 4th, only shown if admin)
+  const tabOrder = ["map","list","import","admin"];
   document.querySelectorAll(".nav-btn").forEach((b,i)=>{
-    b.classList.toggle("active",["map","list","import"][i]===tab);
+    b.classList.toggle("active", tabOrder[i]===tab);
   });
   document.getElementById("panel-list").classList.toggle("active", tab==="list");
   document.getElementById("panel-import").classList.toggle("active", tab==="import");
+  document.getElementById("panel-admin").classList.toggle("active", tab==="admin");
   // Legend + map-style button: only visible on map tab
   document.getElementById("legend").classList.toggle("map-active", tab==="map");
   document.getElementById("map-style-btn").classList.toggle("map-active", tab==="map");
@@ -1229,6 +1300,7 @@ function switchTab(tab) {
   if (badge) badge.classList.toggle("show", tab==="map" && !!selectedActivityId);
   if (tab==="map") setTimeout(()=>map&&map.invalidateSize(),50);
   if (tab==="list") setTimeout(()=>renderChart(), 50);
+  if (tab==="admin") loadAdminUsers();
 }
 
 // ── CSV VALIDATION ───────────────────────────────────────────────────────────
@@ -1633,6 +1705,7 @@ function checkInviteParam() {
 function showInviteAdmin() {
   if (currentUser && currentUser.is_admin) {
     document.getElementById("invite-admin-box").style.display = "block";
+    document.getElementById("nav-admin-btn").style.display = "flex";
   }
 }
 
@@ -1723,6 +1796,226 @@ async function bootApp() {
   showUserInfo();
   showInviteAdmin();
 }
+
+// ── ADMIN: NUTZERVERWALTUNG ──────────────────────────────────────────────────
+
+let adminUsersCache = [];
+let garminModalUserId = null;
+
+async function loadAdminUsers() {
+  const list = document.getElementById("admin-users-list");
+  list.innerHTML = '<p class="admin-empty">Wird geladen…</p>';
+  try {
+    const res = await fetch(API_BASE + "/admin/users", {credentials: "include"});
+    if (!res.ok) {
+      const err = await res.json().catch(()=>({detail: "Fehler beim Laden"}));
+      throw new Error(err.detail);
+    }
+    const data = await res.json();
+    adminUsersCache = data.users;
+    renderUserCards(adminUsersCache);
+  } catch(e) {
+    list.innerHTML = `<p class="admin-empty">Fehler: ${escHtml(e.message)}</p>`;
+  }
+}
+
+function renderUserCards(users) {
+  const list = document.getElementById("admin-users-list");
+  if (!users.length) {
+    list.innerHTML = '<p class="admin-empty">Keine User</p>';
+    return;
+  }
+  list.innerHTML = users.map(u => renderUserCard(u)).join("");
+}
+
+function renderUserCard(u) {
+  const isMe = currentUser && u.username === currentUser.username;
+  const cardClass = u.is_admin ? "user-card admin-card" : "user-card";
+  const adminBadge = u.is_admin ? '<span class="user-badge admin">Admin</span>' : '';
+  const garminBadge = u.has_garmin
+    ? '<span class="user-badge garmin-yes">✓ Garmin</span>'
+    : '<span class="user-badge garmin-no">Kein Garmin</span>';
+
+  const created = u.created_at ? new Date(u.created_at).toLocaleDateString("de-DE") : "–";
+
+  // Last-Sync-Zeile
+  let syncRow = '<div class="user-sync-row">Noch nie gesynct</div>';
+  if (u.last_sync) {
+    const s = u.last_sync;
+    const when = s.finished_at || s.started_at;
+    const dt = when ? new Date(when).toLocaleString("de-DE", {dateStyle:"short", timeStyle:"short"}) : "–";
+    if (s.status === "ok") {
+      const acts = s.activities_imported || 0;
+      const pts = s.gps_points_imported || 0;
+      syncRow = `<div class="user-sync-row"><span class="sync-ok">✓</span> ${dt} – ${acts} Touren, ${pts} GPS</div>`;
+    } else {
+      const errMsg = s.error_message ? `: ${escHtml(s.error_message).substring(0,80)}` : "";
+      syncRow = `<div class="user-sync-row"><span class="sync-err">⚠</span> ${dt} – Fehler${errMsg}</div>`;
+    }
+  }
+
+  // Actions: use data-* and event delegation (no escaping pitfalls)
+  const garminBtn = u.has_garmin
+    ? `<button class="user-action-btn" data-action="garmin-edit" data-uid="${u.id}">Garmin ändern</button>
+       <button class="user-action-btn danger" data-action="garmin-remove" data-uid="${u.id}">Garmin entfernen</button>`
+    : `<button class="user-action-btn" data-action="garmin-add" data-uid="${u.id}">Garmin verknüpfen</button>`;
+
+  const deleteBtn = isMe
+    ? `<button class="user-action-btn danger" disabled title="Du kannst dich nicht selbst löschen">Löschen (self)</button>`
+    : `<button class="user-action-btn danger" data-action="delete" data-uid="${u.id}">Löschen</button>`;
+
+  return `
+    <div class="${cardClass}" data-username="${escHtml(u.username)}">
+      <div class="user-card-head">
+        <div class="user-name">${escHtml(u.username)}${adminBadge}${garminBadge}</div>
+      </div>
+      <div class="user-stats">
+        <span>Touren: <span class="user-stat-val">${u.activity_count.toLocaleString("de-DE")}</span></span>
+        <span>GPS-Punkte: <span class="user-stat-val">${u.gps_point_count.toLocaleString("de-DE")}</span></span>
+        <span>Registriert: <span class="user-stat-val">${created}</span></span>
+        <span>User-ID: <span class="user-stat-val">${u.id}</span></span>
+      </div>
+      ${syncRow}
+      <div class="user-actions">
+        ${garminBtn}
+        ${deleteBtn}
+      </div>
+    </div>
+  `;
+}
+
+// Event delegation für alle Admin-Buttons (sicher gegen XSS)
+document.addEventListener("click", e => {
+  const btn = e.target.closest("[data-action]");
+  if (!btn) return;
+  const action = btn.dataset.action;
+  const uid = parseInt(btn.dataset.uid);
+  if (!uid) return;
+  const user = adminUsersCache.find(u => u.id === uid);
+  if (!user) return;
+
+  switch(action) {
+    case "delete":         confirmDeleteUser(uid, user.username); break;
+    case "garmin-add":     openGarminModal(uid, user.username, false); break;
+    case "garmin-edit":    openGarminModal(uid, user.username, true); break;
+    case "garmin-remove":  confirmRemoveGarmin(uid, user.username); break;
+  }
+});
+
+// ── User löschen ─────────────────────────────────────────────────────────────
+function confirmDeleteUser(userId, username) {
+  showConfirm(
+    `User "${username}" löschen?`,
+    "Alle Touren, GPS-Punkte und Garmin-Daten werden permanent gelöscht. Dies kann nicht rückgängig gemacht werden.",
+    "Endgültig löschen",
+    null,
+    async () => {
+      try {
+        const res = await fetch(API_BASE + "/admin/users/" + userId, {
+          method: "DELETE",
+          credentials: "include"
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(()=>({detail: "Fehler"}));
+          throw new Error(err.detail);
+        }
+        await loadAdminUsers();
+      } catch(e) {
+        alert("Fehler beim Löschen: " + e.message);
+      }
+    }
+  );
+}
+
+// ── Garmin entfernen ─────────────────────────────────────────────────────────
+function confirmRemoveGarmin(userId, username) {
+  showConfirm(
+    "Garmin-Verknüpfung entfernen?",
+    `Auto-Sync für "${username}" wird gestoppt. Bestehende Touren bleiben erhalten. Der User kann sich danach noch einloggen, bekommt aber keine neuen Garmin-Daten mehr.`,
+    "Entfernen",
+    null,
+    async () => {
+      try {
+        const res = await fetch(API_BASE + "/admin/users/" + userId + "/garmin", {
+          method: "DELETE",
+          credentials: "include"
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(()=>({detail: "Fehler"}));
+          throw new Error(err.detail);
+        }
+        await loadAdminUsers();
+      } catch(e) {
+        alert("Fehler: " + e.message);
+      }
+    }
+  );
+}
+
+// ── Garmin-Credentials setzen/ändern (Modal) ────────────────────────────────
+function openGarminModal(userId, username, isEdit) {
+  garminModalUserId = userId;
+  document.getElementById("garmin-modal-title").textContent =
+    isEdit ? "Garmin-Credentials ändern" : "Garmin verknüpfen";
+  document.getElementById("garmin-modal-sub").textContent = "Für: " + username;
+  document.getElementById("garmin-modal-email").value = "";
+  document.getElementById("garmin-modal-pass").value = "";
+  document.getElementById("garmin-modal-err").textContent = "";
+  document.getElementById("garmin-modal").classList.add("show");
+  setTimeout(() => document.getElementById("garmin-modal-email").focus(), 50);
+}
+
+function closeGarminModal() {
+  document.getElementById("garmin-modal").classList.remove("show");
+  garminModalUserId = null;
+}
+
+async function saveGarminCreds() {
+  const email = document.getElementById("garmin-modal-email").value.trim();
+  const pass  = document.getElementById("garmin-modal-pass").value;
+  const errEl = document.getElementById("garmin-modal-err");
+  const btn   = document.getElementById("garmin-modal-save-btn");
+
+  if (!email || !pass) {
+    errEl.textContent = "Email und Passwort sind erforderlich";
+    return;
+  }
+
+  btn.disabled = true;
+  errEl.textContent = "";
+  try {
+    const res = await fetch(API_BASE + "/admin/users/" + garminModalUserId + "/garmin", {
+      method: "POST",
+      credentials: "include",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({email, password: pass})
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(()=>({detail: "Fehler"}));
+      throw new Error(err.detail);
+    }
+    closeGarminModal();
+    await loadAdminUsers();
+  } catch(e) {
+    errEl.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Enter-Key im Modal
+document.getElementById("garmin-modal-email").addEventListener("keydown", e => {
+  if (e.key === "Enter") document.getElementById("garmin-modal-pass").focus();
+});
+document.getElementById("garmin-modal-pass").addEventListener("keydown", e => {
+  if (e.key === "Enter") saveGarminCreds();
+});
+// ESC schließt Modal
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && document.getElementById("garmin-modal").classList.contains("show")) {
+    closeGarminModal();
+  }
+});
 
 boot().catch(e=>{ setSplash("Fehler: "+e.message); console.error(e); });
 </script>

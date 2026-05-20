@@ -98,9 +98,6 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_sync_log_started
                     ON sync_log (started_at DESC);
 
-                CREATE INDEX IF NOT EXISTS idx_sync_log_user
-                    ON sync_log (user_id, started_at DESC);
-
                 COMMIT;
             """)
 
@@ -200,19 +197,23 @@ class Database:
             row[1] for row in
             self._conn.execute("PRAGMA table_info(sync_log)").fetchall()
         }
-        if "user_id" not in cols:
-            with self._lock:
+        with self._lock:
+            if "user_id" not in cols:
+                # Bestehende DB: Spalte nachträglich hinzufügen
                 self._conn.execute(
                     "ALTER TABLE sync_log ADD COLUMN user_id INTEGER "
                     "REFERENCES users(id) ON DELETE SET NULL"
                 )
-                self._conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_sync_log_user "
-                    "ON sync_log (user_id, started_at DESC)"
-                )
-            log.info("Migration: sync_log.user_id + index added")
-        else:
-            log.debug("Migration: sync_log.user_id already present, skipping")
+                log.info("Migration: sync_log.user_id column added")
+            else:
+                log.debug("Migration: sync_log.user_id already present")
+
+            # Index immer (idempotent) erstellen – deckt frische DB
+            # (Spalte schon da) UND migrierte DB (Spalte gerade ergänzt) ab.
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sync_log_user "
+                "ON sync_log (user_id, started_at DESC)"
+            )
 
     def _migrate_nullable_coords(self):
         """

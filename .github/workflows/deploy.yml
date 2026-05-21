@@ -32,6 +32,7 @@ jobs:
       frontend:    ${{ steps.detect.outputs.frontend }}
       backend:     ${{ steps.detect.outputs.backend }}
       garmin_sync: ${{ steps.detect.outputs.garmin_sync }}
+      ops_cli:     ${{ steps.detect.outputs.ops_cli }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,6 +46,7 @@ jobs:
             echo "frontend=true"    >> $GITHUB_OUTPUT
             echo "backend=true"     >> $GITHUB_OUTPUT
             echo "garmin_sync=true" >> $GITHUB_OUTPUT
+            echo "ops_cli=true"     >> $GITHUB_OUTPUT
             exit 0
           fi
           if [ "$MODE" = "frontend" ];    then echo "frontend=true"    >> $GITHUB_OUTPUT; exit 0; fi
@@ -61,8 +63,13 @@ jobs:
           if echo "$CHANGED" | grep -qE '^backend/';     then echo "backend=true"     >> $GITHUB_OUTPUT; fi
           if echo "$CHANGED" | grep -qE '^garmin-sync/'; then echo "garmin_sync=true" >> $GITHUB_OUTPUT; fi
 
-          # Scripts geändert → alles neu deployen (sicher)
-          if echo "$CHANGED" | grep -qE '^scripts/'; then
+          # ops.sh geändert → CLI deployen
+          if echo "$CHANGED" | grep -qE '^scripts/ops\.sh'; then
+            echo "ops_cli=true" >> $GITHUB_OUTPUT
+          fi
+
+          # Andere Scripts geändert → alles neu deployen (sicher)
+          if echo "$CHANGED" | grep -qE '^scripts/(deploy|deploy_backend|deploy_garmin_sync)\.sh'; then
             echo "frontend=true"    >> $GITHUB_OUTPUT
             echo "backend=true"     >> $GITHUB_OUTPUT
             echo "garmin_sync=true" >> $GITHUB_OUTPUT
@@ -193,6 +200,39 @@ jobs:
         run: |
           ssh -i ~/.ssh/deploy_key ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
             "chmod +x ~/trail-atlas/scripts/deploy_garmin_sync.sh && bash ~/trail-atlas/scripts/deploy_garmin_sync.sh"
+
+      - name: Cleanup
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
+
+  deploy-ops-cli:
+    name: Deploy CLI (ops.sh)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.ops_cli == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Upload and install CLI
+        run: |
+          scp -i ~/.ssh/deploy_key scripts/ops.sh \
+            ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:~/trail-atlas/scripts/
+          ssh -i ~/.ssh/deploy_key ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "sudo cp ~/trail-atlas/scripts/ops.sh /usr/local/bin/trail-atlas && \
+             sudo chmod +x /usr/local/bin/trail-atlas && \
+             echo '✓ CLI installed: /usr/local/bin/trail-atlas'"
+
+      - name: Verify
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "trail-atlas --help | head -3"
 
       - name: Cleanup
         if: always()

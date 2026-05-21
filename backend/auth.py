@@ -14,6 +14,7 @@ Abhängigkeiten: bcrypt, itsdangerous, cryptography (in requirements.txt)
 """
 
 import base64
+import hashlib
 import json
 import os
 import secrets
@@ -216,18 +217,73 @@ def decrypt_garmin_credentials(encrypted: str) -> dict:
     return json.loads(decrypted.decode("utf-8"))
 
 
-def save_garmin_credentials(db: Database, user_id: int, email: str, password: str):
-    """Garmin-Credentials verschlüsselt in der DB speichern (UPSERT)."""
+class GarminAccountInUse(Exception):
+    """
+    Wird ausgelöst wenn versucht wird, einen Garmin-Account zu registrieren,
+    der bereits einem anderen Trail-Atlas-User zugeordnet ist.
+    """
+    def __init__(self, existing_user_id: int):
+        self.existing_user_id = existing_user_id
+        super().__init__(
+            f"Garmin-Account bereits von user_id={existing_user_id} verwendet"
+        )
+
+
+def _garmin_email_hash(email: str) -> str:
+    """
+    Deterministischer SHA-256-Hash der normalisierten Garmin-Email.
+
+    Normalisierung: trim + lowercase. So zählen "Foo@Bar.com" und
+    " foo@bar.com " als derselbe Account. Der Hash ist one-way – er
+    erlaubt Duplikat-Checks ohne die Email im Klartext zu speichern.
+    """
+    normalized = email.strip().lower()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def find_user_by_garmin_email(db: Database, email: str) -> int | None:
+    """
+    Prüft ob ein Garmin-Account (per Email-Hash) bereits registriert ist.
+    Returns: user_id des bestehenden Users, oder None.
+    """
+    h = _garmin_email_hash(email)
+    rows = db.query(
+        "SELECT user_id FROM garmin_credentials WHERE email_hash = ?", (h,)
+    )
+    return rows[0]["user_id"] if rows else None
+
+
+def save_garmin_credentials(
+    db: Database, user_id: int, email: str, password: str,
+    enforce_unique: bool = True,
+):
+    """
+    Garmin-Credentials verschlüsselt in der DB speichern (UPSERT).
+
+    enforce_unique=True (default): Prüft ob der Garmin-Account bereits einem
+    ANDEREN User zugeordnet ist. Falls ja → GarminAccountInUse.
+    Das verhindert Activity-ID-Kollisionen beim Sync (zwei Trail-Atlas-User
+    mit demselben Garmin-Account würden sich gegenseitig die Touren überschreiben).
+
+    enforce_unique=False: nur für interne Migrationen / Bootstrap.
+    """
+    if enforce_unique:
+        existing_uid = find_user_by_garmin_email(db, email)
+        if existing_uid is not None and existing_uid != user_id:
+            raise GarminAccountInUse(existing_uid)
+
     encrypted = encrypt_garmin_credentials(email, password)
+    email_hash = _garmin_email_hash(email)
     now = datetime.now(timezone.utc).isoformat()
     # UPSERT: INSERT oder UPDATE wenn user_id schon existiert
     db.execute(
-        """INSERT INTO garmin_credentials (user_id, token_json, updated_at)
-           VALUES (?, ?, ?)
+        """INSERT INTO garmin_credentials (user_id, token_json, email_hash, updated_at)
+           VALUES (?, ?, ?, ?)
            ON CONFLICT(user_id) DO UPDATE SET
              token_json = excluded.token_json,
+             email_hash = excluded.email_hash,
              updated_at = excluded.updated_at""",
-        (user_id, encrypted, now)
+        (user_id, encrypted, email_hash, now)
     )
     log.info(f"Garmin credentials saved for user {user_id}")
 
@@ -426,5 +482,59 @@ def _migrate_admin_garmin_credentials(db: Database):
     if has_garmin_credentials(db, admin_id):
         return  # bereits migriert
 
-    save_garmin_credentials(db, admin_id, garmin_email, garmin_password)
+    save_garmin_credentials(db, admin_id, garmin_email, garmin_password, enforce_unique=False)
     log.info(f"Garmin credentials from garmin.env migrated to DB for admin (user_id={admin_id})")
+
+
+def backfill_garmin_email_hashes(db: Database):
+    """
+    Beim App-Start: berechnet email_hash für alle garmin_credentials-Zeilen
+    die noch keinen haben (z.B. nach der Schema-Migration auf bestehender DB).
+
+    Danach wird der UNIQUE-Index erstellt. Falls dabei ein Konflikt auftritt
+    (zwei User mit demselben Garmin-Account – das alte Bug-Szenario), wird
+    das geloggt aber nicht abgebrochen; der Index wird dann nicht-unique
+    erstellt und der Admin muss die Duplikate manuell auflösen.
+    """
+    rows = db.query(
+        "SELECT user_id, token_json FROM garmin_credentials WHERE email_hash IS NULL"
+    )
+    for r in rows:
+        try:
+            creds = decrypt_garmin_credentials(r["token_json"])
+            h = _garmin_email_hash(creds["email"])
+            db.execute(
+                "UPDATE garmin_credentials SET email_hash = ? WHERE user_id = ?",
+                (h, r["user_id"])
+            )
+            log.info(f"Backfilled email_hash for user_id={r['user_id']}")
+        except Exception as e:
+            log.error(f"email_hash backfill für user_id={r['user_id']} fehlgeschlagen: {e}")
+
+    # UNIQUE-Index erstellen – verhindert künftige Doppel-Registrierungen.
+    # Prüfe zuerst auf bereits vorhandene Duplikate (altes Bug-Szenario).
+    dupes = db.query(
+        "SELECT email_hash, COUNT(*) as n FROM garmin_credentials "
+        "WHERE email_hash IS NOT NULL GROUP BY email_hash HAVING n > 1"
+    )
+    if dupes:
+        log.warning(
+            f"ACHTUNG: {len(dupes)} Garmin-Account(s) mehrfach registriert. "
+            f"UNIQUE-Index wird NICHT erstellt. Bitte Duplikate in der "
+            f"Nutzerverwaltung auflösen (Garmin-Verknüpfung bei Doppel-Usern entfernen)."
+        )
+        # Normaler Index als Fallback (für schnelle Lookups)
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_garmin_email_hash "
+            "ON garmin_credentials (email_hash)"
+        )
+    else:
+        # Sauber – UNIQUE-Index erstellen
+        try:
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_garmin_email_hash "
+                "ON garmin_credentials (email_hash)"
+            )
+            log.info("UNIQUE-Index auf garmin_credentials.email_hash erstellt")
+        except Exception as e:
+            log.error(f"UNIQUE-Index konnte nicht erstellt werden: {e}")

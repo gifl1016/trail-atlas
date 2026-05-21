@@ -44,6 +44,7 @@ from auth import (
     create_invite_code, validate_invite_code, redeem_invite_code,
     save_garmin_credentials, get_all_garmin_users, has_garmin_credentials,
     list_all_users, delete_user, remove_garmin_credentials,
+    backfill_garmin_email_hashes, GarminAccountInUse, find_user_by_garmin_email,
     SESSION_MAX_AGE,
 )
 
@@ -63,6 +64,7 @@ async def lifespan(app: FastAPI):
     log.info("Trail Atlas Backend starting…")
     db.init()
     ensure_admin_exists(db)
+    backfill_garmin_email_hashes(db)
     yield
     log.info("Trail Atlas Backend stopping…")
     db.close()
@@ -273,6 +275,18 @@ def signup(body: SignupRequest, response: Response):
             detail="Garmin: Email und Passwort müssen beide angegeben werden"
         )
 
+    # Garmin-Account-Duplikat VOR User-Erstellung prüfen.
+    # Ein Garmin-Account darf nur einmal registriert werden, sonst
+    # überschreiben sich die User beim Sync gegenseitig die Touren.
+    if has_garmin:
+        existing = find_user_by_garmin_email(db, garmin_email)
+        if existing is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Dieser Garmin-Account ist bereits mit einem Trail-Atlas-Konto "
+                       "verknüpft. Jeder Garmin-Account kann nur einmal registriert werden."
+            )
+
     # User anlegen
     try:
         user_id = create_user(db, username, body.password, is_admin=False)
@@ -284,8 +298,17 @@ def signup(body: SignupRequest, response: Response):
 
     # Garmin-Credentials verschlüsselt speichern
     if has_garmin:
-        save_garmin_credentials(db, user_id, garmin_email, garmin_password)
-        log.info(f"Signup: {username} – Garmin credentials saved")
+        try:
+            save_garmin_credentials(db, user_id, garmin_email, garmin_password)
+            log.info(f"Signup: {username} – Garmin credentials saved")
+        except GarminAccountInUse:
+            # Race-Condition-Fallback: zwischen Check und Save registriert.
+            # User wieder löschen, damit kein halber Account entsteht.
+            delete_user(db, user_id)
+            raise HTTPException(
+                status_code=409,
+                detail="Dieser Garmin-Account ist bereits verknüpft."
+            )
 
     # Direkt einloggen
     token = create_session_token(user_id, username)
@@ -845,12 +868,24 @@ def admin_set_garmin_credentials(
     """
     Setzt oder ersetzt Garmin-Credentials für einen User.
     Nützlich um User nachträglich mit Garmin zu verknüpfen.
+
+    Lehnt ab wenn der Garmin-Account bereits einem anderen User gehört –
+    ein Garmin-Account darf nur einmal registriert werden.
     """
     target = get_user_by_id(db, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User nicht gefunden")
 
-    save_garmin_credentials(db, user_id, body.email, body.password)
+    try:
+        save_garmin_credentials(db, user_id, body.email, body.password)
+    except GarminAccountInUse as e:
+        other = get_user_by_id(db, e.existing_user_id)
+        other_name = other["username"] if other else f"user_id={e.existing_user_id}"
+        raise HTTPException(
+            status_code=409,
+            detail=f"Dieser Garmin-Account ist bereits mit '{other_name}' verknüpft. "
+                   f"Jeder Garmin-Account kann nur einmal registriert werden."
+        )
     return {"status": "ok", "user_id": user_id, "has_garmin": True}
 
 

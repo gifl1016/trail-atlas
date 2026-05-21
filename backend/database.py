@@ -123,10 +123,13 @@ class Database:
 
                 -- Garmin-Zugangsdaten pro Nutzer
                 -- token_json: verschlüsselter JSON-Blob (Fernet, Schlüssel aus garmin.env)
-                -- Wird in Schritt 6 (Garmin-Sync pro User) befüllt.
+                -- email_hash: SHA-256 der normalisierten Garmin-Email (deterministisch).
+                --   Dient dem UNIQUE-Constraint: ein Garmin-Account darf nur einmal
+                --   registriert werden (sonst Activity-ID-Kollisionen beim Sync).
                 CREATE TABLE IF NOT EXISTS garmin_credentials (
                     user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
                     token_json  TEXT    NOT NULL,
+                    email_hash  TEXT,
                     updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                 );
 
@@ -158,6 +161,9 @@ class Database:
 
         # ── Migration: sync_log.user_id nachträglich hinzufügen ────────────
         self._migrate_sync_log_user_id()
+
+        # ── Migration: garmin_credentials.email_hash nachträglich hinzufügen ──
+        self._migrate_garmin_email_hash()
 
         log.info("Database initialized (schema v3)")
 
@@ -214,6 +220,31 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_sync_log_user "
                 "ON sync_log (user_id, started_at DESC)"
             )
+
+    def _migrate_garmin_email_hash(self):
+        """
+        Fügt garmin_credentials.email_hash hinzu.
+
+        email_hash = SHA-256 der normalisierten Garmin-Email. Erlaubt einen
+        UNIQUE-Constraint, damit ein Garmin-Account nur einmal registriert
+        werden kann (sonst Activity-ID-Kollisionen beim Sync).
+
+        Das Backfilling bestehender Zeilen (Hash aus token_json berechnen)
+        passiert in auth.py beim App-Start, weil dort der Fernet-Key liegt.
+        Der UNIQUE-Index wird ebenfalls erst nach dem Backfilling erstellt.
+        """
+        cols = {
+            row[1] for row in
+            self._conn.execute("PRAGMA table_info(garmin_credentials)").fetchall()
+        }
+        if "email_hash" not in cols:
+            with self._lock:
+                self._conn.execute(
+                    "ALTER TABLE garmin_credentials ADD COLUMN email_hash TEXT"
+                )
+            log.info("Migration: garmin_credentials.email_hash column added")
+        else:
+            log.debug("Migration: garmin_credentials.email_hash already present")
 
     def _migrate_nullable_coords(self):
         """

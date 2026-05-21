@@ -1,328 +1,175 @@
 #!/usr/bin/env bash
 # =============================================================================
-# ops.sh – Trail Atlas Tägliche Operations Helper
+# deploy.sh  –  Trail Atlas Server-seitiges Deploy-Script
 # =============================================================================
-# Eine zentrale Stelle für die häufigsten Befehle..
-#
-# Installation auf VM:
-#   sudo cp ops.sh /usr/local/bin/trail-atlas
-#   sudo chmod +x /usr/local/bin/trail-atlas
-#
-# Verwendung:
-#   trail-atlas status         # Übersicht aller Komponenten
-#   trail-atlas logs           # Backend-Logs (live)
-#   trail-atlas logs sync      # Garmin-Sync Logs (live)
-#   trail-atlas logs nginx     # Nginx Logs (live)
-#   trail-atlas sync           # Manueller Sync jetzt
-#   trail-atlas sync 1         # Test-Sync mit nur 1 Tour
-#   trail-atlas sync dry       # Dry-Run
-#   trail-atlas restart        # Backend-Service neustart
-#   trail-atlas db stats       # DB-Statistik
-#   trail-atlas db backup      # DB-Backup mit Timestamp
-#   trail-atlas db shell       # Interaktive SQLite-Shell
-#   trail-atlas health         # Health-Check API + Frontend
-#   trail-atlas help           # Diese Hilfe
+# Wird von GitHub Actions remote via SSH aufgerufen.
+# Funktioniert mit beiden Varianten:
+#   - v2.x mit Dexie/IndexedDB    (Platzhalter: LEAFLET_CSS_SRI, LEAFLET_JS_SRI,
+#                                  PAPAPARSE_SRI, DEXIE_SRI)
+#   - v3.x ohne Dexie (API-only)  (Platzhalter: LEAFLET_CSS_SRI, LEAFLET_JS_SRI,
+#                                  PAPAPARSE_SRI)
 # =============================================================================
 
 set -euo pipefail
 
-# ── Konfiguration ─────────────────────────────────────────────────────────────
-BACKEND_DIR="/opt/trail-atlas/backend"
-GARMIN_SYNC="/opt/trail-atlas/garmin-sync/garmin_sync.py"
-VENV_PY="/opt/trail-atlas/venv/bin/python3"
-DB_FILE="/var/lib/trail-atlas/trail_atlas.db"
-BACKUP_DIR="/var/lib/trail-atlas/backups"
-LOG_DIR="/var/log/trail-atlas"
-SERVICE="trail-atlas"
-TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
-ENV_FILE="/etc/trail-atlas/garmin.env"
+WEB_ROOT="/var/www/trail-atlas"
+LIBS_DIR="$WEB_ROOT/libs"
+SRC_DIR="$HOME/trail-atlas/src"
+FORCE_DOWNLOAD="${1:-}"
 
-# Sync-API-Key aus garmin.env laden (für authentifizierte API-Calls)
-SYNC_API_KEY=""
-if [ -r "$ENV_FILE" ]; then
-    SYNC_API_KEY=$(grep '^SYNC_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
-fi
+LEAFLET_CSS_URL="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+LEAFLET_JS_URL="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+PAPAPARSE_URL="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"
+DEXIE_URL="https://unpkg.com/dexie@3.2.4/dist/dexie.js"
 
-# Authentifizierter curl-Wrapper
-api_curl() {
-    if [ -n "$SYNC_API_KEY" ]; then
-        curl -sf -H "X-Sync-Key: $SYNC_API_KEY" "$@" 2>/dev/null
-    else
-        curl -sf "$@" 2>/dev/null
-    fi
-}
-
-# ── Farben ────────────────────────────────────────────────────────────────────
 green()  { echo -e "\033[0;32m$*\033[0m"; }
 yellow() { echo -e "\033[0;33m$*\033[0m"; }
 red()    { echo -e "\033[0;31m$*\033[0m"; }
-blue()   { echo -e "\033[0;34m$*\033[0m"; }
-bold()   { echo -e "\033[1m$*\033[0m"; }
 
-# ── Sub-Commands ─────────────────────────────────────────────────────────────
+echo ""
+echo "⛰  Trail Atlas – Deploy"
+echo "══════════════════════════════════════════"
+echo "  Zeitstempel: $(date '+%Y-%m-%d %H:%M:%S')"
 
-cmd_status() {
-    bold "⛰  Trail Atlas – System Status"
-    echo "══════════════════════════════════════════"
+# ── HTML-Datei finden ─────────────────────────────────────────────────────────
+HTML_FILE=$(ls -t "$SRC_DIR"/garmin_trail_atlas_*.html 2>/dev/null | head -1 || true)
+if [[ -z "$HTML_FILE" ]]; then
+    red "❌  Keine HTML-Datei in $SRC_DIR gefunden"
+    exit 1
+fi
+echo "  HTML: $(basename "$HTML_FILE")"
 
-    # Backend Service
-    if systemctl is-active --quiet "$SERVICE"; then
-        green "✓  Backend:    läuft"
-        UPTIME=$(systemctl show "$SERVICE" --property=ActiveEnterTimestamp --value)
-        echo "   Seit:       $UPTIME"
-    else
-        red "✗  Backend:    NICHT aktiv"
+# ── Erkenne Variante: hat HTML einen DEXIE_SRI Platzhalter? ──────────────────
+NEEDS_DEXIE=false
+if grep -q "DEXIE_SRI" "$HTML_FILE"; then
+    NEEDS_DEXIE=true
+fi
+
+# ── Pflicht-Platzhalter prüfen ────────────────────────────────────────────────
+REQUIRED_PLACEHOLDERS=(LEAFLET_CSS_SRI LEAFLET_JS_SRI PAPAPARSE_SRI)
+if $NEEDS_DEXIE; then
+    REQUIRED_PLACEHOLDERS+=(DEXIE_SRI)
+    echo "  Variante: v2.x (mit Dexie/IndexedDB)"
+else
+    echo "  Variante: v3.x (API-basiert, ohne Dexie)"
+fi
+
+for placeholder in "${REQUIRED_PLACEHOLDERS[@]}"; do
+    if ! grep -q "$placeholder" "$HTML_FILE"; then
+        red "❌  Pflicht-Platzhalter '$placeholder' nicht in HTML gefunden."
+        exit 1
     fi
+done
 
-    # Nginx
-    if systemctl is-active --quiet nginx; then
-        green "✓  Nginx:      läuft"
-    else
-        red "✗  Nginx:      NICHT aktiv"
-    fi
+# ── Ordner erstellen + Berechtigungen ─────────────────────────────────────────
+sudo chown -R "$USER" /var/www/trail-atlas 2>/dev/null || true
+mkdir -p "$LIBS_DIR"
 
-    # Cron
-    if systemctl is-active --quiet cron 2>/dev/null || systemctl is-active --quiet crond 2>/dev/null; then
-        green "✓  Cron:       läuft"
-    else
-        red "✗  Cron:       NICHT aktiv"
-    fi
-
-    # API Health
-    HEALTH=$(curl -sf http://127.0.0.1:8000/health 2>/dev/null || echo "fail")
-    if echo "$HEALTH" | grep -q '"ok"'; then
-        VERSION=$(echo "$HEALTH" | grep -oP '"version":"\K[^"]+')
-        green "✓  API:        antwortet  (v$VERSION)"
-    else
-        red "✗  API:        antwortet nicht"
-    fi
-
-    echo ""
-    bold "📊 Datenbank"
-    if sudo test -f "$DB_FILE"; then
-        DB_SIZE=$(sudo du -sh "$DB_FILE" | cut -f1)
-        echo "   Datei:      $DB_FILE  ($DB_SIZE)"
-
-        STATS=$(api_curl http://127.0.0.1:8000/db/stats || echo "{}")
-        if [ "$STATS" != "{}" ]; then
-            ACTS=$(echo "$STATS" | grep -oP '"activities":\K\d+')
-            GPS=$(echo  "$STATS" | grep -oP '"gps_points":\K\d+')
-            NOGPS=$(echo "$STATS" | grep -oP '"activities_no_gps":\K\d+')
-            echo "   Activities: $ACTS  (davon ohne GPS: ${NOGPS:-0})"
-            echo "   GPS Points: $(printf "%'d" $GPS 2>/dev/null || echo $GPS)"
-        fi
-    else
-        red "   DB-Datei nicht gefunden"
-    fi
-
-    echo ""
-    bold "🔄 Letzter Garmin Sync"
-    SYNC=$(api_curl http://127.0.0.1:8000/sync/status || echo "{}")
-    if [ "$SYNC" != "{}" ] && [ "$SYNC" != "" ]; then
-        LAST=$(echo "$SYNC" | grep -oP '"started_at":"\K[^"]+' | head -1)
-        STATUS=$(echo "$SYNC" | grep -oP '"status":"\K[^"]+' | head -1)
-        IMP=$(echo "$SYNC" | grep -oP '"activities_imported":\K\d+' | head -1)
-        if [ -n "$LAST" ]; then
-            if [ "$STATUS" = "ok" ]; then
-                green "   ✓  $LAST  (${IMP:-0} neue Touren)"
-            else
-                red   "   ✗  $LAST  (Status: $STATUS)"
-            fi
-        else
-            yellow "   noch nie gelaufen"
-        fi
-    else
-        yellow "   API nicht erreichbar oder keine Sync-Daten"
-    fi
-
-    echo ""
-    bold "💾 Backups"
-    if sudo test -d "$BACKUP_DIR"; then
-        COUNT=$(sudo ls "$BACKUP_DIR"/trail_atlas_*.db 2>/dev/null | wc -l)
-        NEWEST=$(sudo ls -t "$BACKUP_DIR"/trail_atlas_*.db 2>/dev/null | head -1 | xargs -I{} basename {} 2>/dev/null || echo "keine")
-        echo "   Anzahl:     $COUNT"
-        echo "   Neuestes:   $NEWEST"
-    else
-        yellow "   Kein Backup-Verzeichnis gefunden"
-    fi
-    echo ""
+# ── SRI Helper ────────────────────────────────────────────────────────────────
+sri_hash() {
+    echo -n "sha384-$(openssl dgst -sha384 -binary "$1" | openssl base64 -A)"
 }
 
-cmd_logs() {
-    local what="${1:-backend}"
-    case "$what" in
-        backend|""|api)
-            blue "📋  Backend-Logs (Strg+C zum Beenden)"
-            sudo journalctl -u "$SERVICE" -f
-            ;;
-        sync|garmin)
-            blue "📋  Garmin-Sync Logs (Strg+C zum Beenden)"
-            sudo tail -f "$LOG_DIR/garmin_sync.log"
-            ;;
-        nginx)
-            blue "📋  Nginx Access Log (Strg+C zum Beenden)"
-            sudo tail -f /var/log/nginx/trail-atlas.access.log
-            ;;
-        nginx-error)
-            blue "📋  Nginx Error Log (Strg+C zum Beenden)"
-            sudo tail -f /var/log/nginx/trail-atlas.error.log
-            ;;
-        *)
-            red "Unbekannt: '$what'"
-            echo "Optionen: backend | sync | nginx | nginx-error"
-            exit 1
-            ;;
-    esac
-}
-
-cmd_sync() {
-    local arg="${1:-}"
-    local cmd="$VENV_PY $GARMIN_SYNC"
-    case "$arg" in
-        dry|dry-run)
-            cmd="$cmd --dry-run"
-            blue "🔬  Garmin Sync (Dry-Run)…"
-            ;;
-        [0-9]*)
-            cmd="$cmd --limit $arg"
-            blue "🔄  Garmin Sync (--limit $arg)…"
-            ;;
-        full)
-            cmd="$cmd --full-resync"
-            yellow "⚠  Full-Resync – kann lange dauern"
-            ;;
-        "")
-            blue "🔄  Garmin Sync (alle neuen Touren)…"
-            ;;
-        *)
-            red "Unbekannt: '$arg'"
-            echo "Optionen: <Zahl> | dry | full | (leer für alles)"
-            exit 1
-            ;;
-    esac
-    sudo -u trail-atlas bash -c "$cmd 2>&1 | tee -a $LOG_DIR/garmin_sync.log"
-}
-
-cmd_restart() {
-    blue "🔄  Backend neustart…"
-    sudo systemctl restart "$SERVICE"
-    sleep 2
-    if systemctl is-active --quiet "$SERVICE"; then
-        green "✓  Service läuft"
-        cmd_health
+download_lib() {
+    local url="$1" dest="$2" label="$3"
+    if [[ -f "$dest" && "$FORCE_DOWNLOAD" != "--force" ]]; then
+        yellow "  ↷  $label (gecacht)"
+        return 0
+    fi
+    echo -n "  ↓  $label … "
+    if curl -sSL --fail --retry 3 --retry-delay 2 -o "$dest" "$url"; then
+        green "✓ ($(du -sh "$dest" | cut -f1))"
     else
-        red "✗  Service startet nicht – Logs prüfen:"
-        echo "   trail-atlas logs"
+        red "❌  Fehlgeschlagen: $url"
         exit 1
     fi
 }
 
-cmd_db() {
-    local sub="${1:-stats}"
-    case "$sub" in
-        stats)
-            api_curl http://127.0.0.1:8000/db/stats | python3 -m json.tool
-            ;;
-        backup)
-            sudo -u trail-atlas mkdir -p "$BACKUP_DIR"
-            BACKUP="$BACKUP_DIR/trail_atlas_${TIMESTAMP}_manual.db"
-            blue "💾  Erstelle Backup…"
-            sudo -u trail-atlas sqlite3 "$DB_FILE" ".backup '$BACKUP'"
-            SIZE=$(sudo du -sh "$BACKUP" | cut -f1)
-            green "✓  $BACKUP  ($SIZE)"
-            ;;
-        backups)
-            blue "💾  Vorhandene Backups:"
-            sudo ls -lh "$BACKUP_DIR"/trail_atlas_*.db 2>/dev/null | awk '{print "   "$9"  ("$5")"}'
-            ;;
-        shell)
-            blue "🐚  Öffne SQLite Shell (.quit zum Beenden)"
-            sudo -u trail-atlas sqlite3 "$DB_FILE"
-            ;;
-        *)
-            red "Unbekannt: '$sub'"
-            echo "Optionen: stats | backup | backups | shell"
-            exit 1
-            ;;
-    esac
+# ── Libraries laden ───────────────────────────────────────────────────────────
+echo ""
+echo "📥  Libraries…"
+download_lib "$LEAFLET_CSS_URL" "$LIBS_DIR/leaflet.css"       "Leaflet CSS     "
+download_lib "$LEAFLET_JS_URL"  "$LIBS_DIR/leaflet.js"        "Leaflet JS      "
+download_lib "$PAPAPARSE_URL"   "$LIBS_DIR/papaparse.min.js"  "PapaParse       "
+if $NEEDS_DEXIE; then
+    download_lib "$DEXIE_URL"   "$LIBS_DIR/dexie.js"          "Dexie           "
+else
+    # Dexie nicht mehr nötig – aufräumen falls vorhanden
+    rm -f "$LIBS_DIR/dexie.js"
+fi
+
+# ── SRI-Hashes berechnen ──────────────────────────────────────────────────────
+echo ""
+echo "🔑  SRI-Hashes…"
+LEAFLET_CSS_SRI=$(sri_hash "$LIBS_DIR/leaflet.css")
+LEAFLET_JS_SRI=$(sri_hash  "$LIBS_DIR/leaflet.js")
+PAPAPARSE_SRI=$(sri_hash   "$LIBS_DIR/papaparse.min.js")
+DEXIE_SRI=""
+if $NEEDS_DEXIE; then
+    DEXIE_SRI=$(sri_hash "$LIBS_DIR/dexie.js")
+fi
+
+# Hash-Datei zur Referenz
+{
+    echo "# Trail Atlas SRI Hashes – $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "LEAFLET_CSS_SRI=$LEAFLET_CSS_SRI"
+    echo "LEAFLET_JS_SRI=$LEAFLET_JS_SRI"
+    echo "PAPAPARSE_SRI=$PAPAPARSE_SRI"
+    [[ -n "$DEXIE_SRI" ]] && echo "DEXIE_SRI=$DEXIE_SRI"
+} > "$LIBS_DIR/sri_hashes.txt"
+green "  ✓  Hashes berechnet"
+
+# ── HTML patchen ──────────────────────────────────────────────────────────────
+echo ""
+echo "📄  HTML patchen…"
+
+NEEDS_DEXIE_FLAG=$NEEDS_DEXIE python3 - << PYEOF
+import os
+needs_dexie = os.environ.get("NEEDS_DEXIE_FLAG") == "true"
+
+with open("$HTML_FILE", "r", encoding="utf-8") as f:
+    html = f.read()
+
+replacements = {
+    "LEAFLET_CSS_SRI": "$LEAFLET_CSS_SRI",
+    "LEAFLET_JS_SRI":  "$LEAFLET_JS_SRI",
+    "PAPAPARSE_SRI":   "$PAPAPARSE_SRI",
 }
+if needs_dexie:
+    replacements["DEXIE_SRI"] = "$DEXIE_SRI"
 
-cmd_health() {
-    bold "🩺  Health Check"
-    echo "──────────────────────────────────────"
-    HEALTH=$(curl -sf http://127.0.0.1:8000/health 2>/dev/null || echo "fail")
-    if echo "$HEALTH" | grep -q '"ok"'; then
-        green "✓  API:      $HEALTH"
-    else
-        red "✗  API:      Antwortet nicht"
-    fi
+for placeholder, value in replacements.items():
+    html = html.replace(placeholder, value)
 
-    DOMAIN=$(grep -E "server_name" /etc/nginx/sites-available/trail-atlas 2>/dev/null | grep -v "#" | head -1 | awk '{print $2}' | tr -d ';' || echo "localhost")
-    if curl -sf -o /dev/null "https://$DOMAIN" 2>/dev/null; then
-        green "✓  HTTPS:    $DOMAIN antwortet"
-    else
-        # 401 ist OK – heißt Auth läuft
-        CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://$DOMAIN" 2>/dev/null)
-        if [ "$CODE" = "401" ]; then
-            green "✓  HTTPS:    $DOMAIN antwortet (401 = Auth aktiv ✓)"
-        else
-            red "✗  HTTPS:    $DOMAIN antwortet nicht (HTTP $CODE)"
-        fi
-    fi
-    echo ""
-}
+with open("$WEB_ROOT/index.html", "w", encoding="utf-8") as f:
+    f.write(html)
 
-cmd_help() {
-    cat <<EOF
+print("  ✓  index.html geschrieben")
+PYEOF
 
-⛰  Trail Atlas – Operations Helper
+# ── Berechtigungen für Webserver setzen ──────────────────────────────────────
+sudo chown -R www-data:www-data "$WEB_ROOT"
+sudo chmod 644 "$WEB_ROOT/index.html"
+sudo chmod 644 "$LIBS_DIR"/*.js "$LIBS_DIR"/*.css "$LIBS_DIR"/*.txt 2>/dev/null || true
+sudo chmod 755 "$WEB_ROOT" "$LIBS_DIR"
 
-VERWENDUNG:
-    trail-atlas <command> [args]
+# ── Nginx neu laden ───────────────────────────────────────────────────────────
+echo ""
+echo "🔄  Nginx reload…"
+if sudo nginx -t 2>/dev/null; then
+    sudo systemctl reload nginx
+    green "  ✓  Nginx neu geladen"
+else
+    red "  ❌  Nginx config ungültig – reload übersprungen"
+    sudo nginx -t
+    exit 1
+fi
 
-COMMANDS:
-    status              System-Übersicht (Services, DB, Sync)
-    health              Quick Health-Check
+# ── Deployment-Log ────────────────────────────────────────────────────────────
+LOG_FILE="$HOME/trail-atlas/deploy.log"
+echo "$(date '+%Y-%m-%d %H:%M:%S') | $(basename "$HTML_FILE") | OK" >> "$LOG_FILE"
 
-    logs [target]       Live-Logs anzeigen
-                        Targets: backend (default), sync, nginx, nginx-error
-
-    sync [arg]          Garmin Sync starten
-                        arg: leer (alle neuen) | <Zahl> | dry | full
-
-    restart             Backend-Service neustart
-
-    db <sub>            Datenbank-Operationen
-                        Subs: stats | backup | backups | shell
-
-    help                Diese Hilfe
-
-BEISPIELE:
-    trail-atlas status
-    trail-atlas logs sync
-    trail-atlas sync 1
-    trail-atlas db backup
-    trail-atlas db shell
-
-EOF
-}
-
-# ── Main ─────────────────────────────────────────────────────────────────────
-CMD="${1:-help}"
-shift || true
-
-case "$CMD" in
-    status)         cmd_status         ;;
-    logs)           cmd_logs   "$@"    ;;
-    sync)           cmd_sync   "$@"    ;;
-    restart)        cmd_restart        ;;
-    db)             cmd_db     "$@"    ;;
-    health)         cmd_health         ;;
-    help|--help|-h) cmd_help           ;;
-    *)
-        red "Unbekanntes Kommando: $CMD"
-        echo ""
-        cmd_help
-        exit 1
-        ;;
-esac
+echo ""
+echo "══════════════════════════════════════════"
+green "✅  Deploy abgeschlossen: $(basename "$HTML_FILE")"
+echo ""

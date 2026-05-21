@@ -399,8 +399,9 @@ def delete_user(db: Database, user_id: int):
       1. GPS-Punkte der User-Activities
       2. Activities des Users
       3. Garmin-Credentials (CASCADE, aber explizit ist klarer)
-      4. sync_log-Einträge (FK SET NULL würde sie behalten – wir wollen löschen)
-      5. Invite-Codes die der User erstellt hat (created_by → NULL via FK)
+      4. sync_log-Einträge
+      5. Invite-Codes: created_by / used_by → NULL setzen
+         (FK hat kein ON DELETE SET NULL, daher manuell)
       6. User selbst
     """
     db.execute(
@@ -411,6 +412,8 @@ def delete_user(db: Database, user_id: int):
     db.execute("DELETE FROM activities WHERE user_id = ?", (user_id,))
     db.execute("DELETE FROM garmin_credentials WHERE user_id = ?", (user_id,))
     db.execute("DELETE FROM sync_log WHERE user_id = ?", (user_id,))
+    db.execute("UPDATE invite_codes SET created_by = NULL WHERE created_by = ?", (user_id,))
+    db.execute("UPDATE invite_codes SET used_by = NULL WHERE used_by = ?", (user_id,))
     db.execute("DELETE FROM users WHERE id = ?", (user_id,))
     log.info(f"User deleted: id={user_id}")
 

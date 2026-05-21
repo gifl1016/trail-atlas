@@ -99,7 +99,7 @@ cmd_status() {
 
     echo ""
     bold "📊 Datenbank"
-    if [ -f "$DB_FILE" ]; then
+    if sudo test -f "$DB_FILE"; then
         DB_SIZE=$(sudo du -sh "$DB_FILE" | cut -f1)
         echo "   Datei:      $DB_FILE  ($DB_SIZE)"
 
@@ -108,7 +108,7 @@ cmd_status() {
             ACTS=$(echo "$STATS" | grep -oP '"activities":\K\d+')
             GPS=$(echo  "$STATS" | grep -oP '"gps_points":\K\d+')
             NOGPS=$(echo "$STATS" | grep -oP '"activities_no_gps":\K\d+')
-            echo "   Activities: $ACTS  (davon ohne GPS: $NOGPS)"
+            echo "   Activities: $ACTS  (davon ohne GPS: ${NOGPS:-0})"
             echo "   GPS Points: $(printf "%'d" $GPS 2>/dev/null || echo $GPS)"
         fi
     else
@@ -118,24 +118,26 @@ cmd_status() {
     echo ""
     bold "🔄 Letzter Garmin Sync"
     SYNC=$(api_curl http://127.0.0.1:8000/sync/status || echo "{}")
-    if [ "$SYNC" != "{}" ]; then
+    if [ "$SYNC" != "{}" ] && [ "$SYNC" != "" ]; then
         LAST=$(echo "$SYNC" | grep -oP '"started_at":"\K[^"]+' | head -1)
         STATUS=$(echo "$SYNC" | grep -oP '"status":"\K[^"]+' | head -1)
         IMP=$(echo "$SYNC" | grep -oP '"activities_imported":\K\d+' | head -1)
         if [ -n "$LAST" ]; then
             if [ "$STATUS" = "ok" ]; then
-                green "   ✓  $LAST  ($IMP neue Touren)"
+                green "   ✓  $LAST  (${IMP:-0} neue Touren)"
             else
                 red   "   ✗  $LAST  (Status: $STATUS)"
             fi
         else
             yellow "   noch nie gelaufen"
         fi
+    else
+        yellow "   API nicht erreichbar oder keine Sync-Daten"
     fi
 
     echo ""
     bold "💾 Backups"
-    if [ -d "$BACKUP_DIR" ]; then
+    if sudo test -d "$BACKUP_DIR"; then
         COUNT=$(sudo ls "$BACKUP_DIR"/trail_atlas_*.db 2>/dev/null | wc -l)
         NEWEST=$(sudo ls -t "$BACKUP_DIR"/trail_atlas_*.db 2>/dev/null | head -1 | xargs -I{} basename {} 2>/dev/null || echo "keine")
         echo "   Anzahl:     $COUNT"

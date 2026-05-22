@@ -95,20 +95,28 @@ Beispiele:
   v2.6_local.html          ← IndexedDB-Version (alt)
   v3.3_api_local.html      ← mit Sync-Status
   v3.6_api_local.html      ← mit Invite + Signup
+  v3.7_api_local.html      ← Multi-User, Admin-Panel, harmonisierte Typen
 ```
 
 Major: Architektur-Wechsel (v2→v3 war IndexedDB→API)
 Minor: Neue Features, Bugfixes
 Qualifier: `_api` (API-basiert), `_local` (lokale Libraries, SRI-Platzhalter)
 
+**Wichtig:** Bei jeder Frontend-Änderung die Version in `<title>`, `APP_VERSION`,
+Login-Screen, version-badge und Dateiname hochzählen. Die GitHub Action deployed
+die neueste HTML-Datei basierend auf dem Git-Log.
+
 ### Backend
 ```
 version in main.py → app = FastAPI(version="X.Y.Z")
 
 Sichtbar unter:
-  GET /health → {"status":"ok","version":"1.6.0"}
+  GET /health → {"status":"ok","version":"1.7.0"}
   GET /api/docs → Swagger UI zeigt Version
 ```
+
+Bei jeder Backend-Änderung die Version in `main.py` hochzählen (Patch für Bugfixes,
+Minor für Features, Major für Breaking Changes).
 
 ---
 

@@ -102,34 +102,64 @@ def decrypt_credentials(fernet: Fernet, encrypted: str) -> dict:
 
 # ── Aktivitätstyp-Mapping ────────────────────────────────────────────────────
 ACTIVITY_TYPE_MAP = {
+    # Running
     "running":                 "running",
     "trail_running":           "running",
     "treadmill_running":       "running",
     "track_running":           "running",
     "indoor_running":          "running",
+    # Cycling
     "cycling":                 "cycling",
     "mountain_biking":         "cycling",
     "road_biking":             "cycling",
     "indoor_cycling":          "cycling",
     "gravel_cycling":          "cycling",
     "virtual_ride":            "cycling",
+    # Hiking
     "hiking":                  "hiking",
+    # Walking
     "walking":                 "walking",
     "casual_walking":          "walking",
     "speed_walking":           "walking",
+    # Swimming
     "swimming":                "swimming",
     "open_water_swimming":     "swimming",
     "lap_swimming":            "swimming",
-    "stand_up_paddleboarding": "stand_up_paddleboarding",
-    "kayaking":                "kayaking",
-    "alpine_skiing":           "alpine_skiing",
-    "backcountry_skiing":      "alpine_skiing",
-    "cross_country_skiing":    "alpine_skiing",
-    "snowboarding":            "alpine_skiing",
-    "kitesurfing":             "kitesurfing",
-    "windsurfing":             "kitesurfing",
-    "strength_training":       "strength_training",
+    # Strength / Gym
+    "strength_training":       "strength",
+    # Yoga / Pilates / Breathwork
     "yoga":                    "yoga",
+    "pilates":                 "yoga",
+    "breathwork":              "yoga",
+    # Cardio / HIIT / Indoor
+    "hiit":                    "cardio",
+    "indoor_cardio":           "cardio",
+    "indoor_rowing":           "cardio",
+    "floor_climbing":          "cardio",
+    # Skiing / Winter
+    "alpine_skiing":           "skiing",
+    "backcountry_skiing":      "skiing",
+    "cross_country_skiing":    "skiing",
+    "cross_country_skiing_ws": "skiing",
+    "snowboarding":            "skiing",
+    "resort_skiing":           "skiing",
+    "resort_skiing_snowboarding_ws": "skiing",
+    # Racket sports
+    "tennis":                  "racket",
+    "tennis_v2":               "racket",
+    "squash":                  "racket",
+    "badminton":               "racket",
+    "table_tennis":            "racket",
+    "pickleball":              "racket",
+    # Water sports
+    "stand_up_paddleboarding":    "water",
+    "stand_up_paddleboarding_v2": "water",
+    "kayaking":                "water",
+    "kitesurfing":             "water",
+    "kiteboarding_v2":         "water",
+    "windsurfing":             "water",
+    "sailing":                 "water",
+    "surfing":                 "water",
 }
 
 def normalize_type(t: str) -> str:

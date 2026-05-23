@@ -801,7 +801,7 @@ def get_sync_users(request: Request, user: dict | None = Depends(get_current_use
         raise HTTPException(status_code=403, detail="Nur via Sync-Key zugänglich")
 
     rows = db.query(
-        "SELECT gc.user_id, u.username, gc.token_json "
+        "SELECT gc.user_id, u.username, gc.token_json, gc.updated_at "
         "FROM garmin_credentials gc "
         "JOIN users u ON gc.user_id = u.id"
     )
@@ -811,6 +811,7 @@ def get_sync_users(request: Request, user: dict | None = Depends(get_current_use
             "user_id": r["user_id"],
             "username": r["username"],
             "encrypted_credentials": r["token_json"],
+            "updated_at": r["updated_at"],
         })
     return {"users": users}
 

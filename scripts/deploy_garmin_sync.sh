@@ -50,14 +50,14 @@ sudo chown -R trail-atlas:trail-atlas "$INSTALL_DIR"
 sudo chmod 750 "$INSTALL_DIR/garmin_sync.py"
 green "  ✓  $INSTALL_DIR/garmin_sync.py"
 
-# ── Smoke-Test (Dry-Run) ─────────────────────────────────────────────────────
+# ── Smoke-Test (Config + API Check) ──────────────────────────────────────────
 echo ""
-echo "🔍  Dry-Run Test…"
+echo "🔍  Config-Check…"
 if sudo -u trail-atlas /opt/trail-atlas/venv/bin/python3 \
-    "$INSTALL_DIR/garmin_sync.py" --dry-run --limit 1 2>&1 | tail -5; then
-    green "  ✓  Dry-Run erfolgreich"
+    "$INSTALL_DIR/garmin_sync.py" --check 2>&1 | tail -8; then
+    green "  ✓  Config-Check erfolgreich"
 else
-    red "  ⚠  Dry-Run hatte Probleme – Logs prüfen"
+    red "  ⚠  Config-Check hatte Probleme – Logs prüfen"
 fi
 
 LOG="$HOME/trail-atlas/deploy.log"

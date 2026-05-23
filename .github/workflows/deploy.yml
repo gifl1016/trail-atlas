@@ -63,15 +63,17 @@ jobs:
           if echo "$CHANGED" | grep -qE '^backend/';     then echo "backend=true"     >> $GITHUB_OUTPUT; fi
           if echo "$CHANGED" | grep -qE '^garmin-sync/'; then echo "garmin_sync=true" >> $GITHUB_OUTPUT; fi
 
-          # ops.sh geändert → CLI deployen
-          if echo "$CHANGED" | grep -qE '^scripts/ops\.sh'; then
+          # Scripts geändert → jeweilige Deploy-Jobs + CLI
+          if echo "$CHANGED" | grep -qE '^scripts/'; then
             echo "ops_cli=true" >> $GITHUB_OUTPUT
           fi
-
-          # Andere Scripts geändert → alles neu deployen (sicher)
-          if echo "$CHANGED" | grep -qE '^scripts/(deploy|deploy_backend|deploy_garmin_sync)\.sh'; then
-            echo "frontend=true"    >> $GITHUB_OUTPUT
-            echo "backend=true"     >> $GITHUB_OUTPUT
+          if echo "$CHANGED" | grep -qE '^scripts/deploy\.sh'; then
+            echo "frontend=true" >> $GITHUB_OUTPUT
+          fi
+          if echo "$CHANGED" | grep -qE '^scripts/deploy_backend\.sh'; then
+            echo "backend=true" >> $GITHUB_OUTPUT
+          fi
+          if echo "$CHANGED" | grep -qE '^scripts/deploy_garmin_sync\.sh'; then
             echo "garmin_sync=true" >> $GITHUB_OUTPUT
           fi
 

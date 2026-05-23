@@ -12,6 +12,7 @@ Verwendung:
     python3 garmin_sync.py --full-resync      # auch existierende Touren
     python3 garmin_sync.py --user 2           # nur User mit ID 2 syncen
     python3 garmin_sync.py --skip-gps         # nur Metadaten, kein GPS-Fetch
+    python3 garmin_sync.py --check            # nur Config + API prüfen (kein Garmin-Login)
 
 Konfiguration: /etc/trail-atlas/garmin.env
     → API_BASE, SYNC_API_KEY, SECRET_KEY (für Credential-Entschlüsselung)
@@ -682,6 +683,8 @@ def main():
                         help="Nur einen bestimmten User syncen (user_id)")
     parser.add_argument("--skip-gps", action="store_true",
                         help="GPS-Fetch überspringen (nur Metadaten – schnell)")
+    parser.add_argument("--check", action="store_true",
+                        help="Nur Config + API-Connectivity prüfen (kein Garmin-Login, für Deploy)")
     args = parser.parse_args()
 
     global_t0 = time.monotonic()
@@ -707,6 +710,22 @@ def main():
 
     if not sync_users:
         log.info("   Keine User mit Garmin-Credentials – nichts zu tun")
+        return
+
+    # ── --check Modus: nur Config + API prüfen, kein Garmin-Login ──────────
+    if args.check:
+        log.info(f"   ✓ Config OK, API erreichbar")
+        log.info(f"   ✓ {len(sync_users)} User mit Garmin-Credentials:")
+        for u in sync_users:
+            try:
+                creds = decrypt_credentials(fernet, u["encrypted_credentials"])
+                log.info(f"     · {u['username']} (id={u['user_id']}, email={creds['email']})")
+            except Exception as e:
+                log.error(f"     · {u['username']} (id={u['user_id']}) – Entschlüsselung fehlgeschlagen: {e}")
+                sys.exit(1)
+        log.info(f"   ✓ Alle Credentials entschlüsselbar")
+        elapsed = round(time.monotonic() - global_t0, 2)
+        log.info(f"   Check abgeschlossen in {elapsed}s")
         return
 
     # Optional: nur einen bestimmten User

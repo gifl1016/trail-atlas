@@ -186,29 +186,166 @@ def save_token(user_id: int, token):
     path.write_text(json.dumps(token))
     path.chmod(0o600)
 
-def login_garmin_for_user(user_id: int, email: str, password: str) -> Garmin:
-    """Garmin-Login für einen bestimmten User (Token-Cache pro User)."""
-    # 1. Gespeichertes Token versuchen
+# ── Login-Fail-Tracking ──────────────────────────────────────────────────────
+# Persistiert fehlgeschlagene Logins damit der nächste Cron-Lauf nicht endlos
+# denselben kaputten Account anfragt und dabei den echten Garmin-Account sperrt.
+# Format: {user_id: {"count": N, "last_fail": "ISO-timestamp", "reason": "..."}}
+
+FAIL_FILE = TOKEN_DIR / "_login_failures.json"
+
+def _load_failures() -> dict:
+    try:
+        if FAIL_FILE.exists():
+            return json.loads(FAIL_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+def _save_failures(failures: dict):
+    TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+    FAIL_FILE.write_text(json.dumps(failures, indent=2))
+
+def _record_login_failure(user_id: int, reason: str):
+    failures = _load_failures()
+    key = str(user_id)
+    entry = failures.get(key, {"count": 0})
+    entry["count"] = entry.get("count", 0) + 1
+    entry["last_fail"] = datetime.now(timezone.utc).isoformat()
+    entry["reason"] = reason[:200]
+    failures[key] = entry
+    _save_failures(failures)
+    return entry["count"]
+
+def _clear_login_failure(user_id: int):
+    failures = _load_failures()
+    key = str(user_id)
+    if key in failures:
+        del failures[key]
+        _save_failures(failures)
+
+def _check_login_allowed(user_id: int, cred_updated_at: str = None) -> tuple[bool, str]:
+    """
+    Prüft ob ein Login-Versuch erlaubt ist.
+
+    Regeln (zum Schutz des Garmin-Accounts):
+    - 1. Fehlversuch: nochmal erlaubt (könnte temporär sein)
+    - 2+ Fehlversuche: gesperrt bis Credentials in Trail Atlas geändert werden
+
+    Automatischer Reset: Wenn die Garmin-Credentials in der Trail-Atlas-
+    Nutzerverwaltung geändert wurden (cred_updated_at > last_fail), wird der
+    Counter automatisch zurückgesetzt → User darf wieder probieren.
+
+    Returns: (allowed: bool, reason: str)
+    """
+    failures = _load_failures()
+    key = str(user_id)
+    entry = failures.get(key)
+    if not entry:
+        return True, ""
+
+    count = entry.get("count", 0)
+    last_fail = entry.get("last_fail", "")
+
+    # Credentials neuer als letzter Failure → Admin hat sie aktualisiert → Reset
+    if cred_updated_at and last_fail and cred_updated_at > last_fail:
+        log.info(f"   Credentials aktualisiert ({cred_updated_at} > {last_fail}) → Failure-Counter zurückgesetzt")
+        _clear_login_failure(user_id)
+        return True, ""
+
+    if count >= 2:
+        return False, (
+            f"Login {count}x fehlgeschlagen (zuletzt: {last_fail}). "
+            f"Grund: {entry.get('reason', '?')}. "
+            f"Sync wird übersprungen um Garmin-Account-Sperre zu vermeiden. "
+            f"Bitte Credentials in der Trail-Atlas-Nutzerverwaltung prüfen."
+        )
+    return True, ""
+
+
+# ── Login mit Timeout und Account-Schutz ─────────────────────────────────────
+LOGIN_TIMEOUT_S = 30  # Max Sekunden für einen Login-Versuch
+
+def login_garmin_for_user(user_id: int, email: str, password: str,
+                         cred_updated_at: str = None) -> Garmin:
+    """
+    Garmin-Login für einen bestimmten User.
+
+    Sicherheitsmaßnahmen:
+    1. Login-Fail-Tracking: nach 2+ Fehlversuchen wird der User übersprungen
+       (schützt vor Garmin-Account-Sperre bei falschen Credentials)
+    2. Timeout: Login-Versuch wird nach LOGIN_TIMEOUT_S Sekunden abgebrochen
+       (verhindert Endlos-Blockade durch Cloudflare-Retries)
+    3. Auth-Fehler werden sofort erkannt, nicht nochmal retried
+    """
+    # 1. Fail-Check: darf dieser User überhaupt versuchen?
+    allowed, reason = _check_login_allowed(user_id, cred_updated_at)
+    if not allowed:
+        log.warning(f"   ⚠ Login gesperrt: {reason}")
+        raise GarminConnectAuthenticationError(reason)
+
+    # 2. Gespeichertes Token versuchen (kein Passwort nötig → kein Lockout-Risiko)
     saved = load_token(user_id)
     if saved:
         log.info(f"   Verwende gespeichertes Token")
         try:
             client = Garmin()
             client.login(saved)
+            _clear_login_failure(user_id)  # Token funktioniert → alte Failures löschen
             return client
+        except GarminConnectAuthenticationError:
+            log.warning(f"   Token auth-invalid, fresh login nötig")
         except Exception as e:
-            log.warning(f"   Token ungültig, fresh login: {e}")
+            log.warning(f"   Token ungültig: {e}")
 
-    # 2. Fresh login mit Email/Passwort
+    # 3. Fresh login mit Email/Passwort – MIT TIMEOUT
     log.info(f"   Login: {email}")
     client = Garmin(email=email, password=password)
-    try:
-        client.login()
-    except GarminConnectAuthenticationError:
-        log.error(f"   Login fehlgeschlagen für {email}")
-        raise
 
-    # 3. Token speichern
+    # Timeout via threading: die garminconnect-Library hat interne Retries
+    # die bei Cloudflare-Blocking endlos laufen können. Wir setzen einen
+    # harten Timeout um das zu verhindern.
+    import threading
+    login_error = [None]
+    login_done = threading.Event()
+
+    def _do_login():
+        try:
+            client.login()
+        except Exception as e:
+            login_error[0] = e
+        finally:
+            login_done.set()
+
+    thread = threading.Thread(target=_do_login, daemon=True)
+    thread.start()
+    login_done.wait(timeout=LOGIN_TIMEOUT_S)
+
+    if not login_done.is_set():
+        # Timeout – Login hängt (typisch bei falscher Email/Cloudflare-Loop)
+        fail_count = _record_login_failure(user_id, "Login-Timeout nach {}s".format(LOGIN_TIMEOUT_S))
+        msg = (f"Login-Timeout nach {LOGIN_TIMEOUT_S}s "
+               f"(Versuch {fail_count}, wahrscheinlich falsche Email oder Cloudflare-Block)")
+        log.error(f"   ❌ {msg}")
+        raise GarminConnectAuthenticationError(msg)
+
+    if login_error[0] is not None:
+        err = login_error[0]
+        if isinstance(err, GarminConnectAuthenticationError):
+            fail_count = _record_login_failure(user_id, str(err)[:200])
+            log.error(f"   ❌ Auth-Fehler (Versuch {fail_count}): {err}")
+            raise
+        elif isinstance(err, GarminConnectTooManyRequestsError):
+            # Rate-Limit ist KEIN Auth-Fehler → nicht als Failure zählen
+            log.warning(f"   ⚠ Rate-Limited: {err}")
+            raise
+        else:
+            fail_count = _record_login_failure(user_id, str(err)[:200])
+            log.error(f"   ❌ Login-Fehler (Versuch {fail_count}): {err}")
+            raise GarminConnectAuthenticationError(str(err))
+
+    # 4. Login erfolgreich → Failure-Counter zurücksetzen + Token speichern
+    _clear_login_failure(user_id)
+
     try:
         save_token(user_id, client.garth.dumps())
         log.info(f"   Token gespeichert: {_token_path(user_id)}")
@@ -390,6 +527,7 @@ def sync_user(
     email: str,
     password: str,
     args,
+    cred_updated_at: str = None,
 ) -> dict:
     """
     Sync für einen einzelnen User:
@@ -422,7 +560,7 @@ def sync_user(
                 log.warning(f"   API-Liste nicht ladbar, full sync: {e}")
 
         # 2. Garmin Login
-        client = login_garmin_for_user(user_id, email, password)
+        client = login_garmin_for_user(user_id, email, password, cred_updated_at)
         log.info(f"   Login erfolgreich")
 
         # 3. Recent activities laden
@@ -610,6 +748,7 @@ def main():
             email=creds["email"],
             password=creds["password"],
             args=args,
+            cred_updated_at=u.get("updated_at"),
         )
 
         # Sync-Log posten

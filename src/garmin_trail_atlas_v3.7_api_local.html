@@ -403,17 +403,14 @@
     <div class="filter-zone">
       <select class="fz-select" id="type-select" onchange="setTypeFilter(this.value)">
         <option value="all">Alle Typen</option>
-        <option value="hiking">Wandern</option>
+        <option value="hiking">Wandern &amp; Gehen</option>
         <option value="running">Laufen</option>
         <option value="cycling">Radfahren</option>
-        <option value="walking">Gehen</option>
-        <option value="swimming">Schwimmen</option>
-        <option value="strength">Kraft</option>
+        <option value="water">Schwimmen &amp; Wasser</option>
+        <option value="strength">Kraft &amp; Cardio</option>
         <option value="yoga">Yoga</option>
-        <option value="cardio">Cardio</option>
         <option value="skiing">Ski</option>
         <option value="racket">Racketsport</option>
-        <option value="water">Wasser</option>
         <option value="other">Sonstige</option>
       </select>
       <select class="fz-select" id="date-select" onchange="setDateFilter(this.value)">
@@ -574,80 +571,77 @@ const SAMPLE_SUMMARY = [
 // ── SAMPLE DATA injected above ────────────────────────────────────────────────
 
 // ── Activity Type Display ────────────────────────────────────────────────────
-// TYPE_COLORS: Farben für Karte, Legende, Badges
-// TYPE_LABELS: Deutsche Anzeigelabel (Fallback: typeKey mit _ → Leerzeichen)
-const TYPE_COLORS = {
-  hiking:      "#00e5ff",
-  running:     "#ff6d00",
-  cycling:     "#76ff03",
-  walking:     "#a0a0a0",
-  swimming:    "#aa00ff",
-  yoga:        "#e040fb",
-  strength:    "#b2ebf2",
-  skiing:      "#ffd740",
-  water:       "#ff4081",
-  racket:      "#69f0ae",
-  cardio:      "#ff8a65",
-  default:     "#888888"
+// WICHTIG: Frontend-only Mapping. Aktivitäten-Liste und Detail zeigen den ECHTEN
+// Garmin-Typ. Nur Karten-Legende und Filter-Dropdown nutzen die Gruppierung.
+//
+// GROUP_COLORS / GROUP_LABELS: für die gruppierten Kategorien (Legende, Filter)
+const GROUP_COLORS = {
+  hiking:   "#00e5ff",   // Wandern + Gehen
+  running:  "#ff6d00",
+  cycling:  "#76ff03",
+  water:    "#ff4081",   // Schwimmen + Wasser
+  yoga:     "#e040fb",
+  strength: "#b2ebf2",   // Kraft + Cardio
+  skiing:   "#ffd740",
+  racket:   "#69f0ae",
+  default:  "#888888"
 };
-const TYPE_LABELS = {
-  hiking:      "Wandern",
-  running:     "Laufen",
-  cycling:     "Radfahren",
-  walking:     "Gehen",
-  swimming:    "Schwimmen",
-  yoga:        "Yoga",
-  strength:    "Kraft",
-  skiing:      "Ski",
-  water:       "Wasser",
-  racket:      "Racketsport",
-  cardio:      "Cardio",
-  winter:      "Wintersport",
+const GROUP_LABELS = {
+  hiking:   "Wandern & Gehen",
+  running:  "Laufen",
+  cycling:  "Radfahren",
+  water:    "Schwimmen & Wasser",
+  yoga:     "Yoga",
+  strength: "Kraft & Cardio",
+  skiing:   "Ski",
+  racket:   "Racketsport",
 };
-// Frontend-seitiges Mapping: normalisiert Typen die das Backend-Mapping evtl.
-// nicht abdeckt (z.B. neue Garmin-Typen oder custom Activities).
-const TYPE_NORMALIZE = {
-  // Running
+// Garmin typeKey → Gruppe. Nur für Legende + Filter.
+const TYPE_GROUP = {
+  // Laufen
   running: "running", trail_running: "running", treadmill_running: "running",
   track_running: "running", indoor_running: "running",
-  // Cycling
+  // Radfahren
   cycling: "cycling", mountain_biking: "cycling", road_biking: "cycling",
   indoor_cycling: "cycling", gravel_cycling: "cycling", virtual_ride: "cycling",
-  // Hiking
+  // Wandern & Gehen (gemerged)
   hiking: "hiking",
-  // Walking
-  walking: "walking", casual_walking: "walking", speed_walking: "walking",
-  // Swimming
-  swimming: "swimming", open_water_swimming: "swimming", lap_swimming: "swimming",
-  // Strength / Gym
+  walking: "hiking", casual_walking: "hiking", speed_walking: "hiking",
+  // Schwimmen & Wasser (gemerged)
+  swimming: "water", open_water_swimming: "water", lap_swimming: "water",
+  stand_up_paddleboarding: "water", "stand_up_paddleboarding_v2": "water",
+  kayaking: "water", kitesurfing: "water", "kiteboarding_v2": "water",
+  windsurfing: "water", sailing: "water", surfing: "water",
+  // Kraft & Cardio (gemerged)
   strength_training: "strength", strength: "strength",
-  // Yoga / Pilates / Breathwork
+  hiit: "strength", indoor_cardio: "strength", indoor_rowing: "strength",
+  floor_climbing: "strength",
+  // Yoga
   yoga: "yoga", pilates: "yoga", breathwork: "yoga",
-  // Cardio / HIIT / Indoor
-  hiit: "cardio", indoor_cardio: "cardio", indoor_rowing: "cardio",
-  floor_climbing: "cardio",
-  // Skiing / Winter
+  // Ski
   alpine_skiing: "skiing", backcountry_skiing: "skiing",
   cross_country_skiing: "skiing", snowboarding: "skiing",
   resort_skiing: "skiing", "resort_skiing_snowboarding_ws": "skiing",
   "cross_country_skiing_ws": "skiing",
-  // Racket sports
+  // Racketsport
   tennis: "racket", "tennis_v2": "racket", squash: "racket",
   badminton: "racket", table_tennis: "racket", pickleball: "racket",
-  // Water sports
-  stand_up_paddleboarding: "water", "stand_up_paddleboarding_v2": "water",
-  kayaking: "water", kitesurfing: "water", "kiteboarding_v2": "water",
-  windsurfing: "water", sailing: "water", surfing: "water",
 };
-function normalizeType(t) {
+// Gruppe eines Garmin-Typs (für Legende + Filter)
+function typeGroup(t) {
   const key = (t || "").toLowerCase().trim();
-  return TYPE_NORMALIZE[key] || key;
+  return TYPE_GROUP[key] || "other";
 }
-function typeLabel(t) {
-  const n = normalizeType(t);
-  return TYPE_LABELS[n] || n.replace(/_/g, " ");
+// Label einer Gruppe
+function groupLabel(g) {
+  return GROUP_LABELS[g] || (g === "other" ? "Sonstige" : g);
 }
-const getColor = t => TYPE_COLORS[normalizeType(t)] || TYPE_COLORS.default;
+// Echter Garmin-Typ, nur formatiert (_ → Leerzeichen). Für Liste + Detail.
+function rawTypeLabel(t) {
+  return (t || "unknown").replace(/_/g, " ");
+}
+// Farbe: über die Gruppe (Karte, Legende, Badges)
+const getColor = t => GROUP_COLORS[typeGroup(t)] || GROUP_COLORS.default;
 
 // ── XSS-Safe HTML escaping ────────────────────────────────────────────────────
 // All CSV-sourced fields must pass through this before use in innerHTML
@@ -700,21 +694,16 @@ let gpsCache = {};  // activity_id → [[lat,lng], ...] – preloaded from /acti
 let activeType="all", activeDateKey="all", activeSort="date-desc";
 let mapFitted=false, currentStyle="dark";
 let selectedActivityId=null; // currently selected/highlighted track
-const KNOWN_TYPES = new Set(Object.keys(TYPE_COLORS).filter(k => k !== "default"));
-
 const MAP_STYLES = {
   dark:      {url:"https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", maxZoom:19},
   topo:      {url:"https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",             maxZoom:17},
   satellite: {url:"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", maxZoom:19}
 };
 
-// Type filter: works on normalized types
-// "other" = all types not in KNOWN_TYPES
+// Type filter: matcht über die Gruppe (Wandern&Gehen, Schwimmen&Wasser, Kraft&Cardio gemerged)
 function typeMatches(actType, filterVal) {
-  if (filterVal === "all")   return true;
-  const nt = normalizeType(actType);
-  if (filterVal === "other") return !KNOWN_TYPES.has(nt);
-  return nt === filterVal;
+  if (filterVal === "all") return true;
+  return typeGroup(actType) === filterVal;
 }
 
 // ── API: Verbindung prüfen ────────────────────────────────────────────────────
@@ -808,7 +797,7 @@ async function renderTracks(fitView = false) {
 
         if (!activityDists[act.activity_id]) activityDists[act.activity_id] = haversineKm(pts);
         totalPtsEstimate += pts.length;
-        usedTypes.add(normalizeType(act.activity_type));
+        usedTypes.add(typeGroup(act.activity_type));
 
         const baseStep   = Math.max(1, Math.floor(pts.length / 300));
         const globalStep = totalPtsEstimate > MAX_RENDER_PTS
@@ -840,7 +829,7 @@ async function renderTracks(fitView = false) {
 
       // Start marker: show for all activities with coordinates (even without GPS track)
       if (act.start_lat != null && act.start_lng != null) {
-        if (!hasTrack) usedTypes.add(normalizeType(act.activity_type));
+        if (!hasTrack) usedTypes.add(typeGroup(act.activity_type));
         if (!hasTrack && !isDim) allLL.push([act.start_lat, act.start_lng]);
         const icon = L.divIcon({
           className: "",
@@ -891,8 +880,9 @@ function updateMarkerVisibility() {
 function renderLegend(types) {
   const el = document.getElementById("legend");
   if (!types.length) { el.innerHTML=""; return; }
-  el.innerHTML = types.map(t=>
-    `<div class="leg-row"><div class="leg-line" style="background:${getColor(t)}"></div>${escHtml(typeLabel(t))}</div>`
+  // types enthält bereits Gruppen-Keys (aus usedTypes via typeGroup)
+  el.innerHTML = types.map(g=>
+    `<div class="leg-row"><div class="leg-line" style="background:${GROUP_COLORS[g]||GROUP_COLORS.default}"></div>${escHtml(groupLabel(g))}</div>`
   ).join("");
 }
 
@@ -1005,7 +995,7 @@ function renderChart() {
   const yMetric= document.getElementById("chart-yaxis").value;
 
   // Use type-filtered only (not date-filtered) so chart always shows full timeline
-  const base = activeType==="all" ? activities : activities.filter(a=>normalizeType(a.activity_type)===activeType);
+  const base = activeType==="all" ? activities : activities.filter(a=>typeGroup(a.activity_type)===activeType);
 
   // Aggregate into buckets
   const map_ = new Map();
@@ -1123,7 +1113,7 @@ function renderListCards(list) {
       <span class="dot" style="background:${getColor(a.activity_type)}"></span>
       <div class="lc-body">
         <span class="lc-title">${escHtml(fmtDS(a.start_date))}</span>
-        <span class="lc-sub">${escHtml(typeLabel(a.activity_type))}${a.end_date?" · "+escHtml(fmtDur(a.start_date,a.end_date)):""}</span>
+        <span class="lc-sub">${escHtml(rawTypeLabel(a.activity_type))}${a.end_date?" · "+escHtml(fmtDur(a.start_date,a.end_date)):""}</span>
       </div>
       ${dist ? `<span class="lc-dist">${escHtml(fmtKm(dist))}</span>` : ""}
       <span class="chevron">›</span>
@@ -1166,14 +1156,14 @@ function showApiError(msg) {
 function renderImportStats() {
   const types={};
   for (const a of activities) {
-    const nt = normalizeType(a.activity_type);
-    types[nt]=(types[nt]||0)+1;
+    const t = (a.activity_type || "unknown");
+    types[t]=(types[t]||0)+1;
   }
   const box = document.getElementById("stats-box");
   box.innerHTML = `<p class="stats-title">Datenbank</p>
     <p class="stat-row"><span>Aktivitäten geladen</span><strong id="stat-total">${activities.length}</strong></p>`
     +Object.entries(types).sort((a,b)=>b[1]-a[1]).map(([t,n])=>
-      `<p class="stat-row"><span style="color:${getColor(t)}">● ${escHtml(typeLabel(t))}</span><strong>${n}</strong></p>`
+      `<p class="stat-row"><span style="color:${getColor(t)}">● ${escHtml(rawTypeLabel(t))}</span><strong>${n}</strong></p>`
     ).join("");
   refreshDbInfo();
 }
@@ -1299,7 +1289,7 @@ function updateSelBadge() {
   }
   const act = activities.find(a=>a.activity_id===selectedActivityId);
   if (!act) { badge.classList.remove("show"); return; }
-  const label = fmtDS(act.start_date) + " · " + typeLabel(act.activity_type);
+  const label = fmtDS(act.start_date) + " · " + rawTypeLabel(act.activity_type);
   document.getElementById("sel-badge-label").textContent = label;
   // Badge only visible on map tab
   if (currentTab === "map") badge.classList.add("show");
@@ -1327,7 +1317,7 @@ async function showSheet(act) {
   document.getElementById("sheet").innerHTML=`
     <div class="handle"></div>
     <div class="sheet-hrow">
-      <span class="badge" style="background:${c}22;color:${c}">${escHtml(typeLabel(act.activity_type))}</span>
+      <span class="badge" style="background:${c}22;color:${c}">${escHtml(rawTypeLabel(act.activity_type))}</span>
       <div style="display:flex;gap:8px;align-items:center">
         <button class="delete-btn" onclick="confirmDeleteActivity('${escHtml(act.activity_id)}')" title="Tour löschen">🗑</button>
         <button class="close-btn"  onclick="closeSheet()">✕</button>
@@ -1474,7 +1464,7 @@ function confirmAction(type) {
 async function confirmDeleteActivity(id) {
   const act = activities.find(a=>a.activity_id===id);
   if (!act) return;
-  const label = escHtml(fmtDS(act.start_date)) + " · " + escHtml(typeLabel(act.activity_type));
+  const label = escHtml(fmtDS(act.start_date)) + " · " + escHtml(rawTypeLabel(act.activity_type));
   showConfirm(
     "Tour löschen",
     `"${label}" und alle zugehörigen GPS-Punkte werden dauerhaft gelöscht.`,

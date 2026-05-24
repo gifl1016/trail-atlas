@@ -16,9 +16,12 @@ Endpoints:
     GET    /activities/{id}/gps        → GPS-Punkte einer Aktivität
     GET    /activities/gps/all         → Alle GPS-Punkte aller Aktivitäten (Bulk)
     DELETE /activities/{id}            → Aktivität + GPS löschen
+    PUT    /activities/{id}/rating     → Aktivität bewerten (1-5 Sterne)
+    DELETE /activities/{id}/rating     → Bewertung entfernen
     POST   /import/summary             → CSV Metadaten importieren
     POST   /import/gps                 → CSV GPS-Punkte importieren
-    DELETE /db/reset                   → Alle Daten löschen
+    DELETE /db/reset                   → Alle Daten löschen (inkl. Bewertungen)
+    DELETE /db/garmin                  → Nur Garmin-Daten löschen (Bewertungen bleiben)
     DELETE /db/gps                     → Nur GPS-Punkte löschen
     GET    /db/stats                   → DB-Statistiken
     GET    /sync/status                → Letzte Sync-Einträge
@@ -71,7 +74,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Trail Atlas API",
-    version="1.7.0",
+    version="1.8.0",
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url=None,
@@ -338,16 +341,21 @@ def generate_invite(user: dict | None = Depends(get_current_user)):
 def get_activities(request: Request, user: dict | None = Depends(get_current_user)):
     uid = _resolve_user_id(user, request)
     if uid is not None:
+        # LEFT JOIN auf activity_ratings: rating ist NULL wenn unbewertet.
+        # Gejoint auf (user_id, activity_id) damit jeder nur seine Ratings sieht.
         rows = db.query(
-            "SELECT activity_id, activity_type, start_date, end_date, "
-            "start_lat, start_lng FROM activities "
-            "WHERE user_id = ? ORDER BY start_date DESC",
-            (uid,)
+            "SELECT a.activity_id, a.activity_type, a.start_date, a.end_date, "
+            "a.start_lat, a.start_lng, r.rating "
+            "FROM activities a "
+            "LEFT JOIN activity_ratings r "
+            "  ON r.activity_id = a.activity_id AND r.user_id = ? "
+            "WHERE a.user_id = ? ORDER BY a.start_date DESC",
+            (uid, uid)
         )
     else:
         rows = db.query(
             "SELECT activity_id, activity_type, start_date, end_date, "
-            "start_lat, start_lng FROM activities ORDER BY start_date DESC"
+            "start_lat, start_lng, NULL as rating FROM activities ORDER BY start_date DESC"
         )
     return [dict(r) for r in rows]
 
@@ -398,7 +406,17 @@ def get_activity(activity_id: str, request: Request, user: dict | None = Depends
         )
     if not rows:
         raise HTTPException(status_code=404, detail="Aktivität nicht gefunden")
-    return dict(rows[0])
+    result = dict(rows[0])
+    # Rating des aktuellen Users mitgeben (NULL wenn unbewertet)
+    result["rating"] = None
+    if uid is not None:
+        rating_rows = db.query(
+            "SELECT rating FROM activity_ratings WHERE user_id = ? AND activity_id = ?",
+            (uid, activity_id)
+        )
+        if rating_rows:
+            result["rating"] = rating_rows[0]["rating"]
+    return result
 
 
 @app.get("/activities/{activity_id}/gps")
@@ -417,6 +435,76 @@ def get_gps(activity_id: str, request: Request, user: dict | None = Depends(get_
         (activity_id,)
     )
     return {"activity_id": activity_id, "points": [[r["lat"], r["lng"]] for r in rows]}
+
+
+# ── Activity Ratings ──────────────────────────────────────────────────────────
+
+class RatingRequest(BaseModel):
+    rating: int = Field(..., ge=1, le=5, description="Sterne-Bewertung 1-5")
+
+
+@app.put("/activities/{activity_id}/rating")
+def set_activity_rating(
+    activity_id: str,
+    body: RatingRequest,
+    request: Request,
+    user: dict | None = Depends(get_current_user),
+):
+    """
+    Bewertung (1-5 Sterne) für eine Aktivität setzen oder ändern.
+
+    Die Bewertung wird unabhängig von der activities-Tabelle gespeichert
+    (kein FK), sie überlebt also einen DB-Reset. Voraussetzung: der User
+    ist eingeloggt – ohne User-Kontext gibt es kein Rating.
+    """
+    uid = _resolve_user_id(user, request)
+    if uid is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Bewertungen erfordern einen eingeloggten Nutzer"
+        )
+
+    # Ownership-Check: gehört die Activity dem User? (nur wenn sie existiert –
+    # ein Rating für eine noch-nicht-gesyncte Activity wäre denkbar, aber wir
+    # verlangen hier dass die Activity da ist um Tippfehler abzufangen)
+    owner = db.query(
+        "SELECT activity_id FROM activities WHERE activity_id = ? AND user_id = ?",
+        (activity_id, uid)
+    )
+    if not owner:
+        raise HTTPException(status_code=404, detail="Aktivität nicht gefunden")
+
+    db.execute(
+        """INSERT INTO activity_ratings (user_id, activity_id, rating, updated_at)
+           VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+           ON CONFLICT(user_id, activity_id) DO UPDATE SET
+             rating = excluded.rating,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')""",
+        (uid, activity_id, body.rating)
+    )
+    log.info(f"Rating set: user={uid} activity={activity_id} → {body.rating}★")
+    return {"status": "ok", "activity_id": activity_id, "rating": body.rating}
+
+
+@app.delete("/activities/{activity_id}/rating")
+def delete_activity_rating(
+    activity_id: str,
+    request: Request,
+    user: dict | None = Depends(get_current_user),
+):
+    """Bewertung einer Aktivität entfernen (zurück auf 'unbewertet')."""
+    uid = _resolve_user_id(user, request)
+    if uid is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Bewertungen erfordern einen eingeloggten Nutzer"
+        )
+    db.execute(
+        "DELETE FROM activity_ratings WHERE user_id = ? AND activity_id = ?",
+        (uid, activity_id)
+    )
+    log.info(f"Rating removed: user={uid} activity={activity_id}")
+    return {"status": "ok", "activity_id": activity_id, "rating": None}
 
 
 @app.delete("/activities/{activity_id}")
@@ -656,24 +744,66 @@ def db_stats(request: Request, user: dict | None = Depends(get_current_user)):
 
 @app.delete("/db/reset")
 def db_reset(request: Request, user: dict | None = Depends(get_current_user)):
+    """
+    Alle Daten des Users löschen: Activities, GPS-Punkte UND Bewertungen.
+    Für einen Reset der NUR Garmin-Daten löscht (Bewertungen behält),
+    siehe DELETE /db/garmin.
+    """
     uid = _resolve_user_id(user, request)
     if uid is not None:
-        # Nur die eigenen Aktivitäten + GPS löschen
+        # Nur die eigenen Aktivitäten + GPS + Ratings löschen
         db.execute(
             "DELETE FROM gps_points WHERE activity_id IN "
             "(SELECT activity_id FROM activities WHERE user_id = ?)",
             (uid,)
         )
         db.execute("DELETE FROM activities WHERE user_id = ?", (uid,))
-        log.info(f"Database reset for user {uid}")
-        return {"status": "reset", "message": "Alle eigenen Daten gelöscht"}
+        db.execute("DELETE FROM activity_ratings WHERE user_id = ?", (uid,))
+        log.info(f"Database reset for user {uid} (incl. ratings)")
+        return {"status": "reset", "message": "Alle eigenen Daten gelöscht (inkl. Bewertungen)"}
     else:
         # Kein User-Kontext (Auth nicht aktiv) → alles löschen
         db.execute("DELETE FROM gps_points")
         db.execute("DELETE FROM activities")
+        db.execute("DELETE FROM activity_ratings")
         db.execute("VACUUM")
-        log.info("Database reset (all data deleted)")
+        log.info("Database reset (all data deleted, incl. ratings)")
         return {"status": "reset", "message": "Alle Daten gelöscht"}
+
+
+@app.delete("/db/garmin")
+def db_reset_garmin(request: Request, user: dict | None = Depends(get_current_user)):
+    """
+    Alle Garmin-Daten des Users löschen: Activities + GPS-Punkte.
+    Bewertungen bleiben erhalten – beim nächsten Sync tauchen die
+    Aktivitäten wieder auf und die Bewertungen sind sofort wieder sichtbar
+    (Ratings sind per activity_id verknüpft, nicht per FK).
+    """
+    uid = _resolve_user_id(user, request)
+    if uid is not None:
+        acts = db.query(
+            "SELECT COUNT(*) as n FROM activities WHERE user_id = ?", (uid,)
+        )[0]["n"]
+        db.execute(
+            "DELETE FROM gps_points WHERE activity_id IN "
+            "(SELECT activity_id FROM activities WHERE user_id = ?)",
+            (uid,)
+        )
+        db.execute("DELETE FROM activities WHERE user_id = ?", (uid,))
+        ratings = db.query(
+            "SELECT COUNT(*) as n FROM activity_ratings WHERE user_id = ?", (uid,)
+        )[0]["n"]
+        log.info(f"Garmin data reset for user {uid}: {acts} activities deleted, {ratings} ratings kept")
+        return {
+            "status": "reset",
+            "message": f"Garmin-Daten gelöscht ({acts} Aktivitäten). {ratings} Bewertungen behalten.",
+        }
+    else:
+        db.execute("DELETE FROM gps_points")
+        db.execute("DELETE FROM activities")
+        db.execute("VACUUM")
+        log.info("Garmin data reset (all activities/gps deleted, ratings kept)")
+        return {"status": "reset", "message": "Alle Garmin-Daten gelöscht (Bewertungen behalten)"}
 
 
 @app.delete("/db/gps")

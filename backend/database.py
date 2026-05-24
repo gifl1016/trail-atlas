@@ -153,6 +153,30 @@ class Database:
                 COMMIT;
             """)
 
+            # ── v4: Activity-Bewertungen ──────────────────────────────────────
+            # WICHTIG: KEIN Foreign Key auf activities! Bewertungen sollen einen
+            # DB-Reset (DELETE FROM activities) überleben. Eine Bewertung kann
+            # daher kurzzeitig auf eine activity_id zeigen die gerade nicht in
+            # der DB ist (z.B. nach "Alle Garmin-Daten zurücksetzen", bis der
+            # nächste Sync die Activity wiederherstellt).
+            # PK (user_id, activity_id): jede Bewertung gehört eindeutig einem User.
+            self._conn.executescript("""
+                BEGIN;
+
+                CREATE TABLE IF NOT EXISTS activity_ratings (
+                    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    activity_id TEXT    NOT NULL,
+                    rating      INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+                    updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    PRIMARY KEY (user_id, activity_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_ratings_activity
+                    ON activity_ratings (activity_id);
+
+                COMMIT;
+            """)
+
         # ── Migration: activities.user_id nachträglich hinzufügen ─────────────
         self._migrate_activities_user_id()
 
@@ -165,7 +189,7 @@ class Database:
         # ── Migration: garmin_credentials.email_hash nachträglich hinzufügen ──
         self._migrate_garmin_email_hash()
 
-        log.info("Database initialized (schema v3)")
+        log.info("Database initialized (schema v4)")
 
     def _migrate_activities_user_id(self):
         """

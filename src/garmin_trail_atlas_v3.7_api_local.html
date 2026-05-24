@@ -125,6 +125,16 @@
   .badge{padding:4px 12px;border-radius:20px;font-size:11px;font-weight:500;text-transform:capitalize}
   .close-btn{background:#1a1a1a;border:none;color:#666;width:28px;height:28px;border-radius:50%;cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center}
   .sheet-date{font-size:15px;font-weight:500;margin:0 0 14px;text-transform:capitalize;color:#e8e8e0}
+  /* ── STAR RATING ── */
+  .rating-row{background:#1a1a1a;border-radius:10px;padding:10px 13px;display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
+  .star-rating{display:flex;align-items:center;gap:4px}
+  .star{font-size:24px;color:#333;cursor:pointer;transition:color .12s;user-select:none;line-height:1}
+  .star.filled{color:#ffd740}
+  .star.hover{color:#ffe98a}
+  .rating-clear{margin-left:8px;font-size:13px;color:#555;cursor:pointer;width:22px;height:22px;border-radius:50%;background:#0e0e0e;display:flex;align-items:center;justify-content:center;transition:color .12s}
+  .rating-clear:hover{color:#ff8080}
+  /* ── RATING BADGE in list ── */
+  .lc-rating{color:#ffd740;font-size:11px;letter-spacing:1px;white-space:nowrap}
   .sheet-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
   .sstat{background:#1a1a1a;border-radius:10px;padding:11px 13px;display:flex;flex-direction:column;gap:4px}
   .ss-lbl{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:.5px}
@@ -192,6 +202,7 @@
   .db-danger-zone{margin-top:14px;display:flex;flex-direction:column;gap:8px}
   .db-btn{width:100%;padding:10px 14px;border-radius:10px;font-size:12px;font-weight:500;cursor:pointer;text-align:left;display:flex;align-items:center;gap:8px}
   .db-btn-reset{background:#ff444410;border:1px solid #ff444430;color:#ff6b6b}
+  .db-btn-garmin{background:#ff8a3310;border:1px solid #ff8a3330;color:#ff9d5c}
   .db-btn-gps{background:#ffd74010;border:1px solid #ffd74030;color:#ffd740}
   .db-btn-icon{font-size:14px;flex-shrink:0}
 
@@ -416,6 +427,16 @@
       <select class="fz-select" id="date-select" onchange="setDateFilter(this.value)">
         <option value="all">Alle Zeiträume</option>
       </select>
+      <select class="fz-select" id="rating-select" onchange="setRatingFilter(this.value)">
+        <option value="all">Alle Bewertungen</option>
+        <option value="5">★★★★★</option>
+        <option value="4">★★★★ und mehr</option>
+        <option value="3">★★★ und mehr</option>
+        <option value="2">★★ und mehr</option>
+        <option value="1">★ und mehr</option>
+        <option value="rated">Nur bewertete</option>
+        <option value="unrated">Nur unbewertete</option>
+      </select>
       <div class="fz-divider"></div>
       <select class="sort-select" id="sort-select" onchange="applyFilters()">
         <option value="date-desc">Neueste</option>
@@ -461,6 +482,9 @@
         <div class="db-danger-zone">
           <button class="db-btn db-btn-gps" onclick="confirmAction('gps')">
             <span class="db-btn-icon">⚡</span> Nur GPS-Punkte löschen
+          </button>
+          <button class="db-btn db-btn-garmin" onclick="confirmAction('garmin')">
+            <span class="db-btn-icon">↺</span> Alle Garmin-Daten zurücksetzen
           </button>
           <button class="db-btn db-btn-reset" onclick="confirmAction('all')">
             <span class="db-btn-icon">🗑</span> Alle Daten zurücksetzen
@@ -691,7 +715,7 @@ async function apiFetch(path, options={}) {
 
 let map, tileLayer, canvasRenderer, polylines=[], markers=[], activities=[], activityDists={}, currentTab="map";
 let gpsCache = {};  // activity_id → [[lat,lng], ...] – preloaded from /activities/gps/all
-let activeType="all", activeDateKey="all", activeSort="date-desc";
+let activeType="all", activeDateKey="all", activeSort="date-desc", activeRating="all";
 let mapFitted=false, currentStyle="dark";
 let selectedActivityId=null; // currently selected/highlighted track
 const MAP_STYLES = {
@@ -935,12 +959,29 @@ function setDateFilter(key) {
   applyFilters(true);
 }
 
+function setRatingFilter(val) {
+  activeRating = val;
+  applyFilters(true);
+}
+
+// Prüft ob eine Activity den aktiven Bewertungs-Filter erfüllt.
+// "all" → alles, "rated"/"unrated" → bewertet/unbewertet,
+// "1".."5" → mindestens N Sterne.
+function ratingMatches(a) {
+  if (activeRating === "all")     return true;
+  if (activeRating === "rated")   return a.rating != null;
+  if (activeRating === "unrated") return a.rating == null;
+  const min = parseInt(activeRating);
+  return a.rating != null && a.rating >= min;
+}
+
 function getFiltered() {
   const xGrain = document.getElementById("chart-xaxis") ? document.getElementById("chart-xaxis").value : "month";
   return activities.filter(a => {
     const typeOk = typeMatches(a.activity_type, activeType);
     const dateOk = activeDateKey==="all" || dateBucket(a.start_date, xGrain)===activeDateKey;
-    return typeOk && dateOk;
+    const ratingOk = ratingMatches(a);
+    return typeOk && dateOk && ratingOk;
   });
 }
 
@@ -994,8 +1035,11 @@ function renderChart() {
   const xGrain = document.getElementById("chart-xaxis").value;
   const yMetric= document.getElementById("chart-yaxis").value;
 
-  // Use type-filtered only (not date-filtered) so chart always shows full timeline
-  const base = activeType==="all" ? activities : activities.filter(a=>typeGroup(a.activity_type)===activeType);
+  // Type- und Rating-gefiltert (nicht Datum-gefiltert, damit die Timeline voll bleibt)
+  const base = activities.filter(a =>
+    (activeType==="all" || typeGroup(a.activity_type)===activeType) &&
+    ratingMatches(a)
+  );
 
   // Aggregate into buckets
   const map_ = new Map();
@@ -1109,12 +1153,16 @@ function renderListCards(list) {
   }
   document.getElementById("list-scroll").innerHTML = list.map(a => {
     const dist = activityDists[a.activity_id];
+    const ratingBadge = a.rating
+      ? `<span class="lc-rating" title="${a.rating} von 5 Sternen">${"★".repeat(a.rating)}</span>`
+      : "";
     return `<button class="list-card" onclick="openActivity('${escHtml(a.activity_id)}')">
       <span class="dot" style="background:${getColor(a.activity_type)}"></span>
       <div class="lc-body">
         <span class="lc-title">${escHtml(fmtDS(a.start_date))}</span>
         <span class="lc-sub">${escHtml(rawTypeLabel(a.activity_type))}${a.end_date?" · "+escHtml(fmtDur(a.start_date,a.end_date)):""}</span>
       </div>
+      ${ratingBadge}
       ${dist ? `<span class="lc-dist">${escHtml(fmtKm(dist))}</span>` : ""}
       <span class="chevron">›</span>
     </button>`;
@@ -1324,6 +1372,15 @@ async function showSheet(act) {
       </div>
     </div>
     <p class="sheet-date">${escHtml(fmtDate(act.start_date))}</p>
+    <div class="rating-row" id="rating-row" data-aid="${escHtml(act.activity_id)}">
+      <span class="ss-lbl">Bewertung</span>
+      <div class="star-rating" id="star-rating">
+        ${[1,2,3,4,5].map(n=>
+          `<span class="star${act.rating && n<=act.rating?' filled':''}" data-star="${n}">★</span>`
+        ).join("")}
+        <span class="rating-clear" id="rating-clear" title="Bewertung entfernen"${act.rating?'':' style="display:none"'}>✕</span>
+      </div>
+    </div>
     <div class="sheet-grid">
       <div class="sstat"><span class="ss-lbl">Start</span><span class="ss-val">${escHtml(fmtTime(act.start_date))}</span></div>
       <div class="sstat"><span class="ss-lbl">Ende</span><span class="ss-val">${act.end_date?escHtml(fmtTime(act.end_date)):"–"}</span></div>
@@ -1335,7 +1392,80 @@ async function showSheet(act) {
       <span class="coord-val">${escHtml(Number(act.start_lat).toFixed(5))}° N &nbsp;·&nbsp; ${escHtml(Number(act.start_lng).toFixed(5))}° E</span>
     </div>
     ${showMapBtn ? `<button class="show-on-map-btn" onclick="showOnMap('${escHtml(act.activity_id)}')">◉ Auf Karte zeigen</button>` : ""}`;
+
+  // Star rating event handlers
+  _wireStarRating(act);
+
   document.getElementById("overlay").classList.add("show");
+}
+
+// Verdrahtet die Sterne im Detail-Sheet: Klick setzt/ändert Rating,
+// Klick auf gesetzten Stern oder das ✕ entfernt die Bewertung.
+function _wireStarRating(act) {
+  const row = document.getElementById("rating-row");
+  if (!row) return;
+  const stars = row.querySelectorAll(".star");
+  const clearBtn = document.getElementById("rating-clear");
+
+  // Hover-Vorschau
+  stars.forEach(starEl => {
+    const val = parseInt(starEl.dataset.star);
+    starEl.addEventListener("mouseenter", () => {
+      stars.forEach(s => s.classList.toggle("hover",
+        parseInt(s.dataset.star) <= val));
+    });
+    starEl.addEventListener("mouseleave", () => {
+      stars.forEach(s => s.classList.remove("hover"));
+    });
+    starEl.addEventListener("click", async () => {
+      // Klick auf bereits gesetzten Stern bei aktuellem Rating → entfernen
+      if (act.rating === val) {
+        await _updateRating(act, null);
+      } else {
+        await _updateRating(act, val);
+      }
+    });
+  });
+
+  if (clearBtn) {
+    clearBtn.addEventListener("click", async () => {
+      await _updateRating(act, null);
+    });
+  }
+}
+
+// Setzt (1-5) oder entfernt (null) das Rating, aktualisiert UI + lokalen State.
+async function _updateRating(act, newRating) {
+  try {
+    if (newRating === null) {
+      await apiFetch(`/activities/${encodeURIComponent(act.activity_id)}/rating`,
+        {method: "DELETE"});
+    } else {
+      await apiFetch(`/activities/${encodeURIComponent(act.activity_id)}/rating`,
+        {method: "PUT", headers: {"Content-Type": "application/json"},
+         body: JSON.stringify({rating: newRating})});
+    }
+    // Lokalen State aktualisieren
+    act.rating = newRating;
+    const inList = activities.find(a => a.activity_id === act.activity_id);
+    if (inList) inList.rating = newRating;
+
+    // Sheet-Sterne neu zeichnen
+    const row = document.getElementById("rating-row");
+    if (row) {
+      row.querySelectorAll(".star").forEach(s => {
+        const v = parseInt(s.dataset.star);
+        s.classList.toggle("filled", newRating && v <= newRating);
+        s.classList.remove("hover");
+      });
+      const clearBtn = document.getElementById("rating-clear");
+      if (clearBtn) clearBtn.style.display = newRating ? "" : "none";
+    }
+    // Aktivitätenliste neu rendern (falls sichtbar) damit das Rating-Badge stimmt
+    if (currentTab === "list") applyFilters();
+  } catch(e) {
+    showApiError("Bewertung fehlgeschlagen: " + e.message);
+  }
 }
 function closeSheet(){ document.getElementById("overlay").classList.remove("show"); }
 document.getElementById("overlay").addEventListener("click", e=>{ if(e.target.id==="overlay") closeSheet(); });
@@ -1432,7 +1562,7 @@ function confirmAction(type) {
   if (type === "all") {
     showConfirm(
       "Alle Daten löschen",
-      "Alle Touren und GPS-Punkte werden unwiderruflich aus der Datenbank entfernt.",
+      "Alle Touren, GPS-Punkte UND Bewertungen werden unwiderruflich aus der Datenbank entfernt.",
       "Alles löschen", "red",
       async () => {
         try {
@@ -1442,6 +1572,21 @@ function confirmAction(type) {
           await refreshAll();
           await renderTracks(false);
         } catch(e) { showApiError("Reset fehlgeschlagen: " + e.message); }
+      }
+    );
+  } else if (type === "garmin") {
+    showConfirm(
+      "Alle Garmin-Daten zurücksetzen",
+      "Alle Touren und GPS-Punkte werden gelöscht. Deine Bewertungen bleiben erhalten – beim nächsten Garmin-Sync tauchen die Touren wieder auf und die Bewertungen sind sofort wieder sichtbar.",
+      "Garmin-Daten löschen", "red",
+      async () => {
+        try {
+          await apiFetch("/db/garmin", {method:"DELETE"});
+          localStorage.removeItem("lastImport");
+          activityDists = {}; gpsCache = {}; mapFitted = false; selectedActivityId = null;
+          await refreshAll();
+          await renderTracks(false);
+        } catch(e) { showApiError("Garmin-Reset fehlgeschlagen: " + e.message); }
       }
     );
   } else {

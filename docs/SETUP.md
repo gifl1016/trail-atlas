@@ -80,8 +80,10 @@ sudo nginx -t && sudo systemctl reload nginx
 ```bash
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin trail-atlas
 sudo mkdir -p /opt/trail-atlas/backend /var/lib/trail-atlas /var/log/trail-atlas
-sudo chown trail-atlas:trail-atlas /var/lib/trail-atlas /var/log/trail-atlas
+sudo mkdir -p /var/lib/trail-atlas/garmin_tokens
+sudo chown -R trail-atlas:trail-atlas /var/lib/trail-atlas /var/log/trail-atlas
 sudo chmod 750 /var/lib/trail-atlas
+sudo chmod 700 /var/lib/trail-atlas/garmin_tokens
 ```
 
 ### 2.2 Python Environment
@@ -89,7 +91,9 @@ sudo chmod 750 /var/lib/trail-atlas
 ```bash
 sudo apt install -y python3-venv python3-pip sqlite3
 python3 -m venv /opt/trail-atlas/venv
-sudo /opt/trail-atlas/venv/bin/pip install fastapi uvicorn python-multipart bcrypt itsdangerous
+sudo /opt/trail-atlas/venv/bin/pip install -r /path/to/repo/backend/requirements.txt
+# requirements.txt enthält:
+#   fastapi, uvicorn, python-multipart, bcrypt, itsdangerous, cryptography
 ```
 
 ### 2.3 Backend-Code deployen
@@ -111,26 +115,36 @@ sudo chmod 600 /etc/trail-atlas/garmin.env
 sudo nano /etc/trail-atlas/garmin.env
 ```
 
-Inhalt der garmin.env:
+Inhalt der `garmin.env`:
 
 ```env
-# Garmin Connect Login
-GARMIN_EMAIL=deine@email.com
-GARMIN_PASSWORD=dein-garmin-passwort
+# ─── Pflicht ────────────────────────────────────────────────
+
+# Session-Secret + Fernet-Key-Source (python3 -c "import secrets; print(secrets.token_hex(32))")
+# WICHTIG: Wenn dieser Key verloren geht, sind alle verschlüsselten
+# Garmin-Credentials unwiederbringlich weg!
+SECRET_KEY=dein-langer-zufaelliger-hex-string
+
+# Sync-API-Key für den Cronjob (python3 -c "import secrets; print(secrets.token_hex(32))")
+SYNC_API_KEY=dein-sync-api-key
+
+# Admin-Account (wird beim ersten Start automatisch angelegt)
+ADMIN_USER=dein-admin-username
+ADMIN_PASS=dein-sicheres-passwort
 
 # Trail Atlas API (lokal)
 API_BASE=http://127.0.0.1:8000
 
-# Auth: Session-Secret (python3 -c "import secrets; print(secrets.token_hex(32))")
-SECRET_KEY=dein-langer-zufaelliger-hex-string
+# ─── Optional ───────────────────────────────────────────────
 
-# Auth: Admin-Account (wird beim ersten Start automatisch angelegt)
-ADMIN_USER=dein-admin-username
-ADMIN_PASS=dein-sicheres-passwort
-
-# Auth: Sync-API-Key für den Cronjob (python3 -c "import secrets; print(secrets.token_hex(32))")
-SYNC_API_KEY=dein-sync-api-key
+# Garmin-Credentials für den Admin (nur beim ersten Start verwendet, dann
+# verschlüsselt in der DB gespeichert). Weitere User registrieren ihre Garmin-
+# Credentials über die App.
+GARMIN_EMAIL=deine@email.com
+GARMIN_PASSWORD=dein-garmin-passwort
 ```
+
+> **Hinweis:** `GARMIN_EMAIL`/`GARMIN_PASSWORD` sind seit Backend 1.7.0 optional. Sie werden nur beim ersten Backend-Start ausgewertet: falls der Admin-Account noch keine Garmin-Credentials in der DB hat, werden sie aus diesen Env-Vars Fernet-verschlüsselt in die DB geschrieben. Danach kann der Admin sie über die App ändern. Weitere User hinterlegen ihre eigenen Garmin-Credentials beim Signup.
 
 ### 2.5 Systemd Service
 
@@ -155,15 +169,17 @@ EnvironmentFile=/etc/trail-atlas/garmin.env
 sudo systemctl daemon-reload
 sudo systemctl enable trail-atlas
 sudo systemctl start trail-atlas
-curl http://127.0.0.1:8000/health   # → {"status":"ok","version":"1.6.0"}
+curl http://127.0.0.1:8000/health   # → {"status":"ok","version":"1.8.0"}
 ```
 
 Prüfe im Log ob der Admin-Account erstellt wurde:
 
 ```bash
-sudo journalctl -u trail-atlas -n 20
+sudo journalctl -u trail-atlas -n 30
+# → "Database initialized (schema v4)"
 # → "User created: dein-username (id=1, admin=True)"
-# → "Assigned N existing activities to admin 'dein-username'"
+# → "Garmin credentials from garmin.env migrated to DB for admin (user_id=1)"
+#   (nur wenn GARMIN_EMAIL/_PASSWORD gesetzt waren)
 ```
 
 ### 2.6 Nginx API-Proxy
@@ -190,9 +206,29 @@ sudo chmod 750 /opt/trail-atlas/garmin-sync/garmin_sync.py
 
 ### 3.2 Initial-Test
 
+Schneller Config-Check (kein Garmin-Login, nur Decryption-Test):
+
 ```bash
 sudo -u trail-atlas /opt/trail-atlas/venv/bin/python3 \
-  /opt/trail-atlas/garmin-sync/garmin_sync.py --dry-run
+  /opt/trail-atlas/garmin-sync/garmin_sync.py --check
+```
+
+Output:
+```
+⛰  Trail Atlas Garmin Sync (Multi-User)
+   API: http://127.0.0.1:8000
+   ✓ Config OK, API erreichbar
+   ✓ 1 User mit Garmin-Credentials:
+     · admin (id=1, email=deine@email.com)
+   ✓ Alle Credentials entschlüsselbar
+   Check abgeschlossen in 0.4s
+```
+
+Echter Sync-Test (loggt sich bei Garmin ein):
+
+```bash
+sudo -u trail-atlas /opt/trail-atlas/venv/bin/python3 \
+  /opt/trail-atlas/garmin-sync/garmin_sync.py --limit 1
 ```
 
 ### 3.3 Cronjob + Logrotate
@@ -229,6 +265,7 @@ backend/
 garmin-sync/
 scripts/
 src/
+docs/
 ```
 
 ### 4.2 SSH Deploy-Key
@@ -272,16 +309,39 @@ sudo chmod +x /usr/local/bin/trail-atlas
 trail-atlas status
 ```
 
+Ab dem ersten Push aktualisiert der `deploy-ops-cli` Job das CLI automatisch.
+
 ---
 
 ## Verifikation
 
 ```bash
-trail-atlas status    # alle Komponenten grün?
-trail-atlas health    # API + HTTPS erreichbar?
-trail-atlas sync dry  # Garmin-Sync + API-Key funktioniert?
-trail-atlas sync 1    # Test-Sync: 1 Tour importieren
-trail-atlas db stats  # Daten in der DB?
+trail-atlas status        # alle Komponenten grün?
+trail-atlas health        # API + HTTPS erreichbar?
+
+# Garmin-Sync prüfen:
+sudo -u trail-atlas /opt/trail-atlas/venv/bin/python3 \
+  /opt/trail-atlas/garmin-sync/garmin_sync.py --check    # schneller Config-Check
+sudo -u trail-atlas /opt/trail-atlas/venv/bin/python3 \
+  /opt/trail-atlas/garmin-sync/garmin_sync.py --limit 1  # 1 Tour real importieren
+
+trail-atlas db stats      # Daten in der DB?
 ```
 
-Im Browser: `https://trail-atlas.duckdns.org` → Login-Screen → Anmelden → Karte mit Tracks.
+Im Browser: `https://trail-atlas.duckdns.org` → Login mit `ADMIN_USER`/`ADMIN_PASS` → Karte mit Tracks.
+
+### Erste Schritte als Admin
+
+1. Im Admin-Tab (vierter Reiter, nur für is_admin sichtbar) sind alle User aufgelistet
+2. Über "Einladungscode generieren" (Import-Tab) Freunde einladen
+3. Beim Signup können neue User ihre Garmin-Credentials direkt angeben
+4. Per Admin-Tab kann der Garmin-Account später geändert/entfernt werden
+
+---
+
+## Häufige Setup-Probleme
+
+Siehe [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md), insbesondere:
+- "SECRET_KEY / ADMIN_USER nicht gesetzt" → EnvironmentFile nicht geladen
+- "Permission denied: garmin.env" → falsche Owner/Mode
+- "Login schlägt fehl / MFA-Problem" → Garmin-spezifische Sperren
